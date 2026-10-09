@@ -15,7 +15,7 @@ export const toForwardSlashes = (path: string): string => {
   return /^[A-Za-z]:\/$/.test(slashed) || slashed === '/' ? slashed : slashed.replace(/\/+$/, '')
 }
 
-const isAbsolute = (path: string): boolean => /^[A-Za-z]:\//.test(path) || path.startsWith('/')
+export const isAbsolute = (path: string): boolean => /^[A-Za-z]:\//.test(path) || path.startsWith('/')
 
 export const resolveDataDir = (setting: string, env: HomeEnv): string => {
   if (setting !== '') {
