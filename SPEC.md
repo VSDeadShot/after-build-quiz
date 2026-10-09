@@ -57,7 +57,9 @@ Concurrent sessions may race on a write; accepted for v1.
 
 ## Never
 - Edit code, write files, or run a mutating git command in any project repo. Git use is allow-listed:
-  rev-parse, log, show, cat-file, config --get.
+  rev-parse, log, show, cat-file, config --get. log and show always run with --no-ext-diff --no-textconv;
+  output-to-file options (--output, -o), --ext-diff, --textconv, and cat-file --textconv/--filters are
+  refused, so no repo-configured diff or conversion driver ever runs.
 - Deny, drop, rewrite, or delay any tool call or prompt. The plugin observes; it never gates.
 - Show key points or an answer before the user has attempted the question.
 - Send key points or answer criteria to the main model.
