@@ -1,0 +1,39 @@
+{
+  "name": "after-build-quiz",
+  "version": "0.1.0",
+  "description": "Quizzes you on your own commits so you learn from what gets built.",
+  "author": { "name": "Vedansh Sharma" },
+  "repository": "https://github.com/VSDeadShot/after-build-quiz",
+  "userConfig": {
+    "dataDir": {
+      "type": "string",
+      "title": "Data folder",
+      "description": "Where the queue and quiz log live. Empty means %USERPROFILE%\\.after-build-quiz. Must not be inside a git repo.",
+      "default": ""
+    },
+    "minChangedLines": {
+      "type": "number",
+      "title": "Minimum changed code lines",
+      "description": "Commits with fewer added+deleted code lines (whitespace ignored) are not queued.",
+      "default": 10
+    },
+    "queueCap": {
+      "type": "number",
+      "title": "Pending quiz cap",
+      "description": "Most recent pending commits kept; older ones expire.",
+      "default": 10
+    },
+    "model": {
+      "type": "string",
+      "title": "Quiz model",
+      "description": "Model that writes the questions and grades the answers.",
+      "default": "claude-opus-5-5"
+    },
+    "devMode": {
+      "type": "boolean",
+      "title": "Developer mode",
+      "description": "Enables /quiz calibrate.",
+      "default": false
+    }
+  }
+}
