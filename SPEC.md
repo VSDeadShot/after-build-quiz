@@ -13,8 +13,8 @@ Built against Claude Code 2.1.295 (function-hooks plugin API, early access). Re-
 2. **Trivial = skipped:** merge commits; commits whose changed paths are only docs (*.md, *.mdx, *.txt,
    *.rst, docs/**, LICENSE*, CHANGELOG*), lockfiles, or binaries; commits with < `minChangedLines` (10)
    added+deleted code lines, whitespace ignored.
-3. **Cap.** At most `queueCap` (10) pending, globally. Overflow evicts the oldest into `expired` (reason
-   `cap`). Pending commits that no longer exist are expired (reason `missing`) when reached.
+3. **Cap.** At most `queueCap` (10) pending, globally. Overflow evicts the oldest (by committer date) into
+   `expired` (reason `cap`). Pending commits that no longer exist are expired (reason `missing`) when reached.
 4. **Commands.**
    - `/quiz` — resume the active or paused quiz (re-show the current question); otherwise start a quiz on
      the newest pending commit.
@@ -54,6 +54,10 @@ Built against Claude Code 2.1.295 (function-hooks plugin API, early access). Re-
 `active.json` (current quiz incl. key points and paused flag), `log/YYYY-MM.jsonl`, `calibration/`.
 The plugin refuses to write if `dataDir` is inside a git work tree. Paths are stored with forward slashes.
 Concurrent sessions may race on a write; accepted for v1.
+Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then to `queue.json`; each save
+increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
+`queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so; an unreadable one is
+never overwritten. `expired` keeps the last 50 entries (`expiredCount` keeps counting).
 
 ## Never
 - Edit code, write files, or run a mutating git command in any project repo. Git use is allow-listed:

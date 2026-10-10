@@ -30,6 +30,8 @@ calibration) after every Claude Code update, before any other work.
 
 ## Dev loop
 - `claude plugin validate .` after every change; `tsc -p .`; `claude plugin test .`
+- Integration: `node tests/integration/git-cat-file.mjs` (real throwaway repo in the OS temp folder; Node 24
+  runs hooks/*.ts directly). `claude plugin test` has no processes, so real-git checks live here.
 - Calibration: `claude -p "/quiz calibrate" --plugin-dir .` with `devMode` on (costs real model calls;
   run when the grader changes and after Claude Code updates).
 - Manual runs: `claude --plugin-dir "<this folder>"` from a scratch repo in a temp dir, with `dataDir`
