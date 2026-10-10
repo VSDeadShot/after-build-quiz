@@ -7,9 +7,13 @@ Built against Claude Code 2.1.295 (function-hooks plugin API, early access). Re-
 
 ## Behaviour
 1. **Queue.** Every non-trivial commit made through Claude Code's Bash or PowerShell tool is queued silently
-   (repo, hash, subject, timestamps). A session-start / `/quiz` sweep of the current repo also queues commits
-   made outside Claude Code since the last-seen commit (author = that repo's user.email). First sight of a
-   repo records a baseline only; no backfill. A status-line note "N quizzes pending" ("1 quiz pending")
+   (repo, hash, subject, timestamps). A catch-up sweep also queues commits made outside Claude Code
+   (terminal, IDE): at session start, in the background after the status line shows, for the session repo
+   and the most recently active known repos (20 in all, the session repo among them; current branch only),
+   it takes my commits in `lastSeen..HEAD` (same exact author match, trivial filter) with source `sweep`.
+   First sight of a repo or branch, and a pruned `lastSeen`, record HEAD as a baseline and queue nothing;
+   no backfill. An amend made outside Claude Code replaces the pending commit it amended. Missing folders
+   and folders that are no longer repos are skipped. `/quiz` runs the same sweep before picking (step 3). A status-line note "N quizzes pending" ("1 quiz pending")
    may show; it reads only the queue file and is cleared when nothing is pending.
    A commit counts when HEAD moved from the last commit seen on that repo and branch (detached HEAD is its
    own key, `HEAD`); every commit by the user (`user.email`, exact match: `-F --author=<email>`) in
@@ -65,7 +69,8 @@ Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then
 increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
 `queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so; an unreadable one is
 never overwritten. `expired` keeps the last 50 entries (`expiredCount` keeps counting).
-`lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached).
+`lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached). `seenAt` maps each repo root to its
+last activity (a commit seen, first sight, or being the session repo) and ranks repos for the sweep.
 
 ## Never
 - Edit code, write files, or run a mutating git command in any project repo. Git use is allow-listed:

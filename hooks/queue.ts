@@ -35,7 +35,8 @@ export type Queue = {
   pending: QueueEntry[] // sorted oldest → newest by committedAt
   expired: ExpiredEntry[] // the last EXPIRED_KEPT
   expiredCount: number
-  lastSeen: Record<string, string> // repo → last commit seen (used by the sweep)
+  lastSeen: Record<string, string> // `<repo root>::<branch>` → last commit seen
+  seenAt: Record<string, string> // repo root → last activity (ISO); ranks repos for the sweep
 }
 
 export type QueueIO = {
@@ -55,7 +56,7 @@ export type ParsedCommit = {
 const EXPIRED_KEPT = 50
 
 export const emptyQueue = (): Queue => ({
-  version: 1, seq: 0, pending: [], expired: [], expiredCount: 0, lastSeen: {},
+  version: 1, seq: 0, pending: [], expired: [], expiredCount: 0, lastSeen: {}, seenAt: {},
 })
 
 // `git log -1 --format=<this>`: hash, parents, author date, committer date, subject.
@@ -159,7 +160,9 @@ const isQueue = (value: unknown): value is Queue =>
   Array.isArray(value.pending) && value.pending.every(isEntry) &&
   Array.isArray(value.expired) && value.expired.every(isRecord) &&
   Number.isInteger(value.expiredCount) &&
-  isRecord(value.lastSeen) && Object.values(value.lastSeen).every(hash => typeof hash === 'string')
+  isRecord(value.lastSeen) && Object.values(value.lastSeen).every(hash => typeof hash === 'string') &&
+  (value.seenAt === undefined ||
+    (isRecord(value.seenAt) && Object.values(value.seenAt).every(when => typeof when === 'string')))
 
 type FileState =
   | { state: 'absent' }
@@ -167,7 +170,7 @@ type FileState =
   | { state: 'invalid'; text: string }
   | { state: 'valid'; queue: Queue }
 
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim()
+export const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim()
 
 const readState = async (io: QueueIO, path: string): Promise<FileState> => {
   let text: string
@@ -179,7 +182,8 @@ const readState = async (io: QueueIO, path: string): Promise<FileState> => {
   }
   try {
     const value: unknown = JSON.parse(text)
-    return isQueue(value) ? { state: 'valid', queue: value } : { state: 'invalid', text }
+    // a file from before seenAt existed loads with an empty one
+    return isQueue(value) ? { state: 'valid', queue: { ...value, seenAt: value.seenAt ?? {} } } : { state: 'invalid', text }
   } catch {
     return { state: 'invalid', text }
   }

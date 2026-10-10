@@ -2,7 +2,7 @@ import { git } from './git.ts'
 import type { Run } from './git.ts'
 import { isAbsolute, normalizeDir } from './paths.ts'
 import { COMMIT_FORMAT, enqueue, loadQueue, parseCommitLine, saveQueue } from './queue.ts'
-import type { Queue, QueueIO } from './queue.ts'
+import type { Queue, QueueEntry, QueueIO } from './queue.ts'
 import { classify } from './trivial.ts'
 
 // Spots a `git commit` inside a Bash or PowerShell command line. A false match
@@ -148,23 +148,89 @@ export type DetectInput = {
 
 export type DetectOutcome = { queued: number; queue?: Queue; notice?: string }
 
-type Head = { top: string; sha: string; branch: string } // branch is "HEAD" when detached
+export type Head = { top: string; sha: string; branch: string } // branch is "HEAD" when detached
 
-// The repo the command committed in: the first candidate git recognises.
-// undefined when none is a repo, or the first repo found has no commits yet.
-const findHead = async (run: Run, candidates: readonly string[], isWindows: boolean): Promise<Head | undefined> => {
+// The first candidate git recognises as a repo, with its HEAD and branch, in
+// one call. undefined when none is a repo, or the first repo found has no
+// commits yet (unborn HEAD).
+export const findHead = async (run: Run, candidates: readonly string[], isWindows: boolean): Promise<Head | undefined> => {
   for (const dir of candidates) {
     const found = await git(run, dir, ['rev-parse', '--show-toplevel', 'HEAD', '--abbrev-ref', 'HEAD'])
     const [top, sha, branch] = found.stdout.split(/\r?\n/).filter(line => line !== '')
     if (found.exitCode === 0 && top !== undefined && sha !== undefined && branch !== undefined) {
       return { top: normalizeDir(top, isWindows) ?? top, sha, branch }
     }
-    if (top !== undefined) return undefined // a repo with an unborn HEAD: nothing was committed
+    if (top !== undefined) return undefined
   }
   return undefined
 }
 
+// lastSeen key: one per repo and branch.
+export const sightingKey = (head: Head): string => `${head.top}::${head.branch}`
+
+// Only my commits, matched exactly: -F with the angle brackets of the ident.
+// No user.email configured: no filter.
+export const authorArgs = async (run: Run, top: string): Promise<string[]> => {
+  const email = await git(run, top, ['config', '--get', 'user.email'])
+  const me = email.exitCode === 0 ? email.stdout.trim() : ''
+  return me === '' ? [] : ['-F', `--author=<${me}>`]
+}
+
+export const logMine = (run: Run, top: string, cap: number, author: readonly string[], range: readonly string[]) =>
+  git(run, top, ['log', '--no-merges', `--format=${COMMIT_FORMAT}`, '-n', String(cap), ...author, ...range])
+
+// git lists newest first; we queue oldest first.
+export const commitsIn = (logStdout: string): ParsedLogCommit[] =>
+  logStdout.split(/\r?\n/).flatMap(line => parseCommitLine(line) ?? []).reverse()
+
+type ParsedLogCommit = NonNullable<ReturnType<typeof parseCommitLine>>
+
 const repoName = (top: string): string => top.split('/').filter(part => part !== '').at(-1) ?? top
+
+// show → classify → enqueue, for each commit worth a quiz.
+export const queueWorthy = async (
+  run: Run,
+  top: string,
+  queue: Queue,
+  commits: readonly ParsedLogCommit[],
+  options: {
+    source: QueueEntry['source']
+    now: string
+    minChangedLines: number
+    queueCap: number
+    isAmend: (made: ParsedLogCommit) => boolean
+  },
+): Promise<{ queue: Queue; queued: number }> => {
+  let next = queue
+  let queued = 0
+  for (const made of commits) {
+    const shown = await git(run, top, ['show', '-w', '--numstat', '--format=', made.hash])
+    if (shown.exitCode !== 0) continue
+    const verdict = classify(shown.stdout, made.parents.length, options.minChangedLines)
+    if (verdict.kind !== 'queue') continue
+    next = enqueue(next, {
+      repo: top,
+      repoName: repoName(top),
+      hash: made.hash,
+      parent: made.parents[0] ?? null,
+      subject: made.subject,
+      committedAt: made.committedAt,
+      queuedAt: options.now,
+      source: options.source,
+      codeLines: verdict.codeLines,
+      codeFiles: verdict.codeFiles,
+    }, { isAmend: options.isAmend(made), cap: options.queueCap, now: options.now })
+    queued++
+  }
+  return { queue: next, queued }
+}
+
+// Record HEAD as seen for this repo and branch, and the repo as active now.
+export const markSeen = (queue: Queue, head: Head, now: string): Queue => ({
+  ...queue,
+  lastSeen: { ...queue.lastSeen, [sightingKey(head)]: head.sha },
+  seenAt: { ...queue.seenAt, [head.top]: now },
+})
 
 const sinceArg = (startedAt: number): string => {
   const second = Math.floor(startedAt / 1000) * 1000 - 1000 // committer dates have whole seconds
@@ -197,51 +263,26 @@ const detect = async (deps: DetectDeps, input: DetectInput): Promise<DetectOutco
     loaded.notice === undefined ? outcome : { ...outcome, notice: loaded.notice }
   if (!loaded.isWritable) return withNotice({ queued: 0 })
 
-  const key = `${head.top}::${head.branch}`
-  const lastSeen = loaded.queue.lastSeen[key]
+  const lastSeen = loaded.queue.lastSeen[sightingKey(head)]
   if (lastSeen === head.sha) return withNotice({ queued: 0 }) // HEAD did not move: nothing was committed
 
-  // Only my commits, matched exactly: -F with the angle brackets of the ident.
-  const email = await git(run, head.top, ['config', '--get', 'user.email'])
-  const me = email.exitCode === 0 ? email.stdout.trim() : ''
-  const logArgs = (range: string[]) => [
-    'log', '--no-merges', `--format=${COMMIT_FORMAT}`, '-n', String(deps.queueCap),
-    ...(me === '' ? [] : ['-F', `--author=<${me}>`]),
-    ...range,
-  ]
   // lastSeen..HEAD for a repo and branch seen before; otherwise (first sight,
   // or lastSeen pruned) only commits made since the command started.
-  let log = lastSeen === undefined ? undefined : await git(run, head.top, logArgs([`${lastSeen}..HEAD`]))
-  if (log === undefined || log.exitCode !== 0) log = await git(run, head.top, logArgs([sinceArg(input.startedAt), 'HEAD']))
+  const author = await authorArgs(run, head.top)
+  let log = lastSeen === undefined ? undefined : await logMine(run, head.top, deps.queueCap, author, [`${lastSeen}..HEAD`])
+  if (log === undefined || log.exitCode !== 0) {
+    log = await logMine(run, head.top, deps.queueCap, author, [sinceArg(input.startedAt), 'HEAD'])
+  }
   if (log.exitCode !== 0) return withNotice({ queued: 0 })
 
-  const commits = log.stdout
-    .split(/\r?\n/)
-    .flatMap(line => parseCommitLine(line) ?? [])
-    .reverse() // git lists newest first
-  let queue = loaded.queue
-  let queued = 0
-  for (const made of commits) {
-    const shown = await git(run, head.top, ['show', '-w', '--numstat', '--format=', made.hash])
-    if (shown.exitCode !== 0) continue
-    const verdict = classify(shown.stdout, made.parents.length, deps.minChangedLines)
-    if (verdict.kind !== 'queue') continue
-    queue = enqueue(queue, {
-      repo: head.top,
-      repoName: repoName(head.top),
-      hash: made.hash,
-      parent: made.parents[0] ?? null,
-      subject: made.subject,
-      committedAt: made.committedAt,
-      queuedAt: input.now,
-      source: 'claude-code',
-      codeLines: verdict.codeLines,
-      codeFiles: verdict.codeFiles,
-    }, { isAmend: command.isAmend, cap: deps.queueCap, now: input.now })
-    queued++
-  }
-
-  const saved = await saveQueue(io, dataDir, { ...queue, lastSeen: { ...queue.lastSeen, [key]: head.sha } })
+  const { queue, queued } = await queueWorthy(run, head.top, loaded.queue, commitsIn(log.stdout), {
+    source: 'claude-code',
+    now: input.now,
+    minChangedLines: deps.minChangedLines,
+    queueCap: deps.queueCap,
+    isAmend: () => command.isAmend,
+  })
+  const saved = await saveQueue(io, dataDir, markSeen(queue, head, input.now))
   return withNotice(saved.isSaved ? { queued, queue: saved.queue } : { queued })
 }
 

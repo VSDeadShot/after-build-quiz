@@ -8,6 +8,7 @@ import { loadQueue, statusText } from './queue.ts'
 import type { QueueIO } from './queue.ts'
 import { readSettings } from './settings.ts'
 import type { Settings } from './settings.ts'
+import { sweepRepos } from './sweep.ts'
 
 // Hard rule (AGENTS): no hook throws, blocks or noticeably slows a command.
 // A commit command costs two in-process calls before it runs; everything else
@@ -59,19 +60,31 @@ async function isoNow($: EngineInterface): Promise<string> {
   return new Date(await $.clock.now()).toISOString()
 }
 
-async function detectAfter($: EngineInterface, state: State, input: Omit<DetectInput, 'now'>) {
-  try {
-    const dataDir = await dataDirOf($, state)
-    const verdict = state.dataDirVerdict ?? await checkDataDir(dataDir, {
-      run: (argv, init) => $.process.run(argv, init),
-      exists: path => $.fs.exists(path),
-    })
-    if (!verdict.isSafe) {
-      if (!verdict.isInsideRepo) return debug($, `data folder not checked: ${verdict.reason}`) // try again next time
-      state.dataDirVerdict = verdict
-      return noticeOnce($, state, 'dataDir', `after-build-quiz: ${dataDir} is inside a git repo; quizzes are not saved there. Set dataDir to a folder outside any repo.`)
+// The data folder, once it is known to be outside any repo; undefined means
+// do not write (told once if it is inside a repo, retried if it could not be checked).
+async function safeDataDir($: EngineInterface, state: State): Promise<string | undefined> {
+  const dataDir = await dataDirOf($, state)
+  const verdict = state.dataDirVerdict ?? await checkDataDir(dataDir, {
+    run: (argv, init) => $.process.run(argv, init),
+    exists: path => $.fs.exists(path),
+  })
+  if (!verdict.isSafe) {
+    if (!verdict.isInsideRepo) {
+      debug($, `data folder not checked: ${verdict.reason}`) // try again next time
+      return undefined
     }
     state.dataDirVerdict = verdict
+    noticeOnce($, state, 'dataDir', `after-build-quiz: ${dataDir} is inside a git repo; quizzes are not saved there. Set dataDir to a folder outside any repo.`)
+    return undefined
+  }
+  state.dataDirVerdict = verdict
+  return dataDir
+}
+
+async function detectAfter($: EngineInterface, state: State, input: Omit<DetectInput, 'now'>) {
+  try {
+    const dataDir = await safeDataDir($, state)
+    if (dataDir === undefined) return
 
     const outcome = await detectCommits({
       run: (argv, init) => $.process.run(argv, init),
@@ -85,6 +98,28 @@ async function detectAfter($: EngineInterface, state: State, input: Omit<DetectI
     if (outcome.queue !== undefined) $.ui.status(statusText(outcome.queue))
   } catch (error) {
     debug($, `commit detection failed: ${oneLine(error)}`)
+  }
+}
+
+async function sweepAfter($: EngineInterface, state: State, sessionCwd: string) {
+  try {
+    const dataDir = await safeDataDir($, state)
+    if (dataDir === undefined) return
+
+    const outcome = await sweepRepos({
+      run: (argv, init) => $.process.run(argv, init),
+      io: ioOf($),
+      exists: path => $.fs.exists(path),
+      dataDir,
+      isWindows: /^[A-Za-z]:[\\/]/.test(sessionCwd),
+      minChangedLines: state.settings.minChangedLines,
+      queueCap: state.settings.queueCap,
+    }, { sessionCwd, now: await isoNow($) })
+    for (const error of outcome.errors) debug($, `sweep: ${error}`)
+    if (outcome.notice !== undefined) noticeOnce($, state, 'queue', outcome.notice)
+    if (outcome.queue !== undefined) $.ui.status(statusText(outcome.queue))
+  } catch (error) {
+    debug($, `sweep failed: ${oneLine(error)}`)
   }
 }
 
@@ -137,9 +172,15 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // The status from the queue file first; the catch-up sweep after, on a timer,
+  // in the same one-at-a-time line as commit detections.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await showStatus($, state)
+    const sessionCwd = e.cwd
+    $.clock.after(0, () => {
+      state.detections = state.detections.then(() => sweepAfter($, state, sessionCwd)).catch(() => {})
+    })
     return started
   }).catch(($, e, next) => next(e))
 }
