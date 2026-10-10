@@ -2,7 +2,7 @@
 
 A Claude Code plugin that quizzes the author on their own commits so they learn from what gets built.
 
-Built against Claude Code 2.1.295 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
+Built against Claude Code 2.1.296 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
 `tsc -p .`, `claude plugin test .` and the grader calibration after every Claude Code update.
 
 ## Behaviour
@@ -107,6 +107,12 @@ Commits in repos never opened in Claude Code are not caught. Commits made by scr
 indirectly are caught only by the next sweep.
 Two Claude Code sessions writing the queue file at the same moment can lose an update: v1 serializes
 queue writes within one session only.
+Missing-commit expiry only catches pruned objects: `cat-file -e <sha>^{commit}` cannot detect commits that
+were rebased away or reset, because the reflog keeps them in the object database until git prunes them, so
+those unreachable commits stay pending.
+A rebase made outside Claude Code makes `lastSeen..HEAD` treat the rebased commits as new while the old ones
+stay pending; the queue cap bounds the duplicates.
+v2 fixes both with a reachability check, which needs a read-only allow-list addition proposed on its own.
 
 ## v2 (out of scope)
 Re-asking weak spots; mock-interview mode; fundamentals mode; cross-repo views; optional global
