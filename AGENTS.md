@@ -30,6 +30,11 @@ calibration) after every Claude Code update, before any other work.
 
 ## Dev loop
 - `claude plugin validate .` after every change; `tsc -p .`; `claude plugin test .`
+- `tsc -p .` uses the repo's `tsconfig.json`, which extends the gitignored `.claude-plugin/types/tsconfig.json`.
+  That folder exists only after one interactive `claude --plugin-dir "<this folder>"` load, which lays it.
+- Isolated checks (a clean export of the staged tree) run tsc against the repo's own `tsconfig.json` — copy
+  the engine-laid `.claude-plugin/types/` into the export, then `tsc -p <export>`. Never a scratchpad or
+  other substitute tsconfig. If the repo config fails, that is a real failure, not something to work around.
 - Integration: `node tests/integration/git-cat-file.mjs` (real throwaway repo in the OS temp folder; Node 24
   runs hooks/*.ts directly). `claude plugin test` has no processes, so real-git checks live here.
 - Calibration: `claude -p "/quiz calibrate" --plugin-dir .` with `devMode` on (costs real model calls;
