@@ -9,7 +9,14 @@ Built against Claude Code 2.1.295 (function-hooks plugin API, early access). Re-
 1. **Queue.** Every non-trivial commit made through Claude Code's Bash or PowerShell tool is queued silently
    (repo, hash, subject, timestamps). A session-start / `/quiz` sweep of the current repo also queues commits
    made outside Claude Code since the last-seen commit (author = that repo's user.email). First sight of a
-   repo records a baseline only; no backfill. A status-line note "N quizzes pending" may show.
+   repo records a baseline only; no backfill. A status-line note "N quizzes pending" ("1 quiz pending")
+   may show; it reads only the queue file and is cleared when nothing is pending.
+   A commit counts when HEAD moved from the last commit seen on that repo and branch (detached HEAD is its
+   own key, `HEAD`); every commit by the user (`user.email`, exact match: `-F --author=<email>`) in
+   `lastSeen..HEAD` is considered. The first time a repo or branch is seen, only commits made during the
+   command count (committer date since the command started). Directories are normalised before `git -C`
+   (`C:\x`, `/c/x`, `/cygdrive/c/x` → `C:/x`); a directory that cannot be normalised means no detection,
+   never a guess. Commands run in the background are picked up at the next detection.
 2. **Trivial = skipped:** merge commits; commits whose changed paths are only docs (*.md, *.mdx, *.txt,
    *.rst, docs/**, LICENSE*, CHANGELOG*), lockfiles, or binaries; commits with < `minChangedLines` (10)
    added+deleted code lines, whitespace ignored.
@@ -58,6 +65,7 @@ Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then
 increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
 `queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so; an unreadable one is
 never overwritten. `expired` keeps the last 50 entries (`expiredCount` keeps counting).
+`lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached).
 
 ## Never
 - Edit code, write files, or run a mutating git command in any project repo. Git use is allow-listed:
@@ -92,6 +100,8 @@ never overwritten. `expired` keeps the last 50 entries (`expiredCount` keeps cou
 ## Known limits (v1)
 Commits in repos never opened in Claude Code are not caught. Commits made by scripts that call git
 indirectly are caught only by the next sweep.
+Two Claude Code sessions writing the queue file at the same moment can lose an update: v1 serializes
+queue writes within one session only.
 
 ## v2 (out of scope)
 Re-asking weak spots; mock-interview mode; fundamentals mode; cross-repo views; optional global

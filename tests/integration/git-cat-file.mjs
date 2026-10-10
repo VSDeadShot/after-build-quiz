@@ -5,7 +5,9 @@
 // `cat-file -e <sha>^{commit}` through hooks/git.ts with a no-shell runner, to
 // prove the `^{commit}` suffix reaches git intact. The key case: a blob's sha
 // with `^{commit}` must FAIL; if the suffix were lost, git would only check
-// that the object exists and exit 0. The engine's own spawn ($.process.run) is
+// that the object exists and exit 0. It also checks what tests/fake-git.ts
+// assumes about real git: one-call rev-parse output, -F --author exact match,
+// the --since format, detached HEAD. The engine's own spawn ($.process.run) is
 // covered by the scratch-repo run.
 import { execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -54,6 +56,34 @@ try {
 
   const absent = await git(run, repo, ['cat-file', '-e', `${'0'.repeat(40)}^{commit}`])
   check(`unknown sha with ^{commit} is refused (exit ${absent.exitCode})`, absent.exitCode !== 0)
+
+  // What tests/fake-git.ts assumes about real git, checked here.
+  const headLine = await git(run, repo, ['rev-parse', '--show-toplevel', 'HEAD', '--abbrev-ref', 'HEAD'])
+  const [top, sha, branch] = headLine.stdout.split(/\r?\n/).filter(Boolean)
+  check(`one rev-parse gives root, HEAD and branch (${branch})`, headLine.exitCode === 0 && top !== undefined && sha === commit && branch !== 'HEAD')
+
+  const commitAs = (email, file, date) => {
+    writeFileSync(join(repo, file), `${file}\n`)
+    setupGit(repo, 'add', file)
+    execFileSync('git', ['-C', repo, '-c', `user.email=${email}`, 'commit', '-q', '-m', file], {
+      env: { ...process.env, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date },
+    })
+  }
+  commitAs('a.b@example.com', 'mine.txt', '2026-10-10T08:30:05Z')
+  commitAs('xa.b@example.com', 'prefix.txt', '2026-10-10T08:30:06Z')
+  commitAs('aXb@example.com', 'dot.txt', '2026-10-10T08:30:07Z')
+  commitAs('a.b@example.com.evil', 'suffix.txt', '2026-10-10T08:30:08Z')
+  const authored = await git(run, repo, ['log', '--format=%s', '-F', '--author=<a.b@example.com>', `${commit}..HEAD`])
+  check(`-F --author=<a.b@example.com> matches only that author (${authored.stdout.trim().split(/\r?\n/).join(', ')})`,
+    authored.stdout.trim() === 'mine.txt')
+
+  const since = await git(run, repo, ['log', '--format=%s', '--since=2026-10-10T08:30:07Z', 'HEAD'])
+  check(`--since=<ISO, Z> keeps commits at or after it (${since.stdout.trim().split(/\r?\n/).join(', ')})`,
+    since.stdout.trim().split(/\r?\n/).join(',') === 'suffix.txt,dot.txt')
+
+  setupGit(repo, 'checkout', '-q', '--detach')
+  const detached = await git(run, repo, ['rev-parse', '--show-toplevel', 'HEAD', '--abbrev-ref', 'HEAD'])
+  check('detached HEAD reports the branch as "HEAD"', detached.stdout.split(/\r?\n/).filter(Boolean)[2] === 'HEAD')
 } finally {
   rmSync(repo, { recursive: true, force: true })
 }

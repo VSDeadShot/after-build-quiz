@@ -57,13 +57,13 @@ describe('parseCommit: details', () => {
     expect(parseCommit('git commit -m "--amend"')?.isAmend).toBe(false)
   })
 
-  test('-C path is captured, quotes removed, slashes forward', () => {
-    expect(parseCommit('git -C "C:\\a b\\repo" commit -m x')?.dashC).toBe('C:/a b/repo')
+  test('-C path is captured as typed, quotes removed (normalizeDir runs later)', () => {
+    expect(parseCommit('git -C "C:\\a b\\repo" commit -m x')?.dashC).toBe('C:\\a b\\repo')
   })
 
   test('the last cd before the commit is captured', () => {
     expect(parseCommit('cd /c/one && cd /c/two && git commit -m x')?.cdTarget).toBe('/c/two')
-    expect(parseCommit('Set-Location "C:\\r"; git commit -m x')?.cdTarget).toBe('C:/r')
+    expect(parseCommit('Set-Location "C:\\r"; git commit -m x')?.cdTarget).toBe('C:\\r')
     expect(parseCommit('git commit -m x')?.cdTarget).toBeUndefined()
   })
 })

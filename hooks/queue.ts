@@ -187,10 +187,12 @@ const readState = async (io: QueueIO, path: string): Promise<FileState> => {
 
 const filesOf = (dataDir: string) => ({ main: `${dataDir}/queue.json`, tmp: `${dataDir}/queue.json.tmp` })
 
+// isReadOnly: never write, not even the copy-aside (the status line only reads).
 export const loadQueue = async (
   io: QueueIO,
   dataDir: string,
   now: string,
+  options: { isReadOnly?: boolean } = {},
 ): Promise<{ queue: Queue; notice?: string; isWritable: boolean }> => {
   const { main, tmp } = filesOf(dataDir)
   const mainState = await readState(io, main)
@@ -207,6 +209,14 @@ export const loadQueue = async (
       queue: emptyQueue(),
       isWritable: false,
       notice: `after-build-quiz: could not read queue.json (${mainState.reason}); using an empty queue and not overwriting it this session`,
+    }
+  }
+
+  if (mainState.state === 'invalid' && options.isReadOnly === true) {
+    return {
+      queue: emptyQueue(),
+      isWritable: false,
+      notice: 'after-build-quiz: queue.json is corrupt; it will be copied aside at the next commit',
     }
   }
 
@@ -249,4 +259,11 @@ export const saveQueue = async (
   } catch {
     return { isSaved: false, queue }
   }
+}
+
+// The status line: "N quizzes pending", or nothing when none are.
+export const statusText = (queue: Queue): string | undefined => {
+  const count = queue.pending.length
+  if (count === 0) return undefined
+  return count === 1 ? '1 quiz pending' : `${count} quizzes pending`
 }

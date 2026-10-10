@@ -6,7 +6,8 @@ export type Exists = (path: string) => Promise<boolean>
 
 export type HomeEnv = { USERPROFILE?: string; HOME?: string }
 
-export type DataDirVerdict = { isSafe: true } | { isSafe: false; reason: string }
+// isInsideRepo tells a real refusal (tell the user once) from "could not check" (try again later).
+export type DataDirVerdict = { isSafe: true } | { isSafe: false; isInsideRepo: boolean; reason: string }
 
 const FOLDER = '.after-build-quiz'
 
@@ -53,14 +54,45 @@ export const checkDataDir = async (
   io: { run: Run; exists: Exists },
 ): Promise<DataDirVerdict> => {
   const probe = await nearestExisting(dataDir, io.exists)
-  if (probe === undefined) return { isSafe: false, reason: `no existing folder on the path to ${dataDir}` }
+  if (probe === undefined) {
+    return { isSafe: false, isInsideRepo: false, reason: `no existing folder on the path to ${dataDir}` }
+  }
   try {
     const result = await git(io.run, probe, ['rev-parse', '--is-inside-work-tree'])
     if (result.exitCode === 0 && result.stdout.trim() === 'true') {
-      return { isSafe: false, reason: `${dataDir} is inside a git work tree` }
+      return { isSafe: false, isInsideRepo: true, reason: `${dataDir} is inside a git work tree` }
     }
     return { isSafe: true }
   } catch (error) {
-    return { isSafe: false, reason: `could not run git to check ${dataDir}: ${String(error)}` }
+    return { isSafe: false, isInsideRepo: false, reason: `could not run git to check ${dataDir}: ${String(error)}` }
   }
 }
+
+const driveRoot = (letter: string, rest: string): string =>
+  `${letter.toUpperCase()}:/${rest.replace(/\/+$/, '')}`
+
+// A directory as git -C needs it: `C:/x` on Windows (from `C:\x`, `c:/x`, Git
+// Bash `/c/x`, `/cygdrive/c/x`), `/x` elsewhere; relative paths stay relative,
+// slashes forward. Anything else (UNC, `\x`, `~`, `$VAR`, `%VAR%`, `C:`, `C:x`,
+// other POSIX roots on Windows) is undefined: the caller skips, never guesses.
+export const normalizeDir = (path: string, isWindows: boolean): string | undefined => {
+  const raw = path.trim()
+  if (raw === '' || raw.startsWith('\\') || raw.startsWith('~') || /[$%]/.test(raw)) return undefined
+  const slashed = raw.replace(/\\/g, '/')
+  if (slashed.startsWith('//')) return undefined
+
+  const drive = /^([A-Za-z]):(.*)$/.exec(slashed)
+  if (drive !== null) {
+    if (!isWindows || !drive[2]!.startsWith('/')) return undefined
+    return driveRoot(drive[1]!, drive[2]!.slice(1))
+  }
+
+  if (slashed.startsWith('/')) {
+    if (!isWindows) return slashed === '/' ? '/' : slashed.replace(/\/+$/, '')
+    const mounted = /^\/cygdrive\/([A-Za-z])(?:\/(.*))?$/.exec(slashed) ?? /^\/([A-Za-z])(?:\/(.*))?$/.exec(slashed)
+    return mounted === null ? undefined : driveRoot(mounted[1]!, mounted[2] ?? '')
+  }
+
+  return slashed.replace(/^(\.\/)+/, '').replace(/\/+$/, '') || '.'
+}
+
