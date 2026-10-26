@@ -54,10 +54,12 @@ Claude Code update.
    - CONCEPT — the CS fundamental behind the change, grounded in this code, tagged from a fixed vocabulary
    - EXPLAIN IT BACK — what the commit does and why it matters, as told to an interviewer
    Generated once per quiz (kept in `active.json`) by an isolated, tool-less model call from a context pack
-   read from the commit object, never the work tree: the diff with new-side line numbers, ±30 lines of
-   surrounding code at that commit (the 5 most-changed files), the 10 previous commit subjects, and the
-   repo's SPEC.md / AGENTS.md / README.md at that commit; each part has a size cap and says what it left
-   out. Each question carries private key points and must cite a `path:line` that is a line of the diff.
+   read from the commit object, never the work tree: the commit message (subject and body, ~2k characters),
+   the diff with new-side line numbers, ±30 lines of surrounding code at that commit (the 5 most-changed
+   files), the 10 previous commit subjects, and the repo's SPEC.md / AGENTS.md / README.md at that commit;
+   each part has a size cap and says what it left out. Secret files (`.env*`, `*.pem`, `*.key`, by name,
+   under their old or new path) never enter it: their diff and contents are listed as omitted. Each
+   question carries private key points and must cite a `path:line` that is a line of the diff.
    Ungrounded output is regenerated once; a second ungrounded output expires the commit (reason
    `ungrounded`), which `/quiz stats` counts. An API error or timeout is not a refusal: the commit stays
    pending.
@@ -154,6 +156,8 @@ A rebase made outside Claude Code makes `lastSeen..HEAD` treat the rebased commi
 stay pending; the queue cap bounds the duplicates.
 v2 fixes both with a reachability check, which needs a read-only allow-list addition proposed on its own.
 A crash between the log write and the `active.json` update can log one answer twice.
+Secret filtering is by file name only: a secret committed inside any other file reaches the context pack,
+and a grader gap may quote it into the log.
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

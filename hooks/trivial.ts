@@ -20,12 +20,15 @@ const newPath = (path: string): string =>
     .at(-1)!
     .replace(/\/{2,}/g, '/')
 
-const isNonCode = (path: string): boolean => {
+export const isLockfile = (path: string): boolean => LOCKFILES.has(path.slice(path.lastIndexOf('/') + 1))
+
+// Docs and lockfiles; the context pack uses the same test to order and omit files.
+export const isNonCode = (path: string): boolean => {
   const name = path.slice(path.lastIndexOf('/') + 1)
   return (
     DOC_EXTENSIONS.test(name) ||
     DOC_NAMES.test(name) ||
-    LOCKFILES.has(name) ||
+    isLockfile(path) ||
     path.startsWith('docs/') ||
     path.includes('/docs/')
   )

@@ -4,6 +4,7 @@
 // checked against real git in tests/integration/git-cat-file.mjs.
 import type { ProcessRunResult } from 'claude-code'
 
+import { SHOW_COMMIT } from '../hooks/context.ts'
 import type { Run } from '../hooks/git.ts'
 import { COMMIT_FORMAT } from '../hooks/queue.ts'
 import type { QueueIO } from '../hooks/queue.ts'
@@ -17,6 +18,9 @@ export type FakeCommit = {
   committedAt: string
   subject: string
   numstat: string
+  message: string // %B: subject, blank line, body
+  patch: string // what `git show` prints after the message
+  blobs: Record<string, string> // path → content at this commit
 }
 
 export type FakeRepo = {
@@ -40,9 +44,13 @@ export const DOCS_ONLY = '40\t2\tREADME.md\n'
 
 export const commit = (
   repo: FakeRepo,
-  options: { subject?: string; numstat?: string; email?: string; committedAt?: string; authoredAt?: string; parents?: string[] } = {},
+  options: {
+    subject?: string; numstat?: string; email?: string; committedAt?: string; authoredAt?: string; parents?: string[]
+    body?: string; patch?: string; blobs?: Record<string, string>
+  } = {},
 ): FakeCommit => {
   const committedAt = options.committedAt ?? '2026-10-10T08:30:05Z'
+  const subject = options.subject ?? `commit ${shaCounter + 1}`
   const made: FakeCommit = {
     hash: nextSha(),
     parents: options.parents ?? (repo.head.sha === undefined ? [] : [repo.head.sha]),
@@ -50,8 +58,11 @@ export const commit = (
     email: options.email ?? repo.email ?? 'me@example.com',
     authoredAt: options.authoredAt ?? committedAt,
     committedAt,
-    subject: options.subject ?? `commit ${shaCounter}`,
+    subject,
     numstat: options.numstat ?? CODE_20,
+    message: options.body === undefined ? `${subject}\n` : `${subject}\n\n${options.body}\n`,
+    patch: options.patch ?? '',
+    blobs: options.blobs ?? {},
   }
   repo.commits.set(made.hash, made)
   repo.head.sha = made.hash
@@ -116,11 +127,14 @@ const answerLog = (repo: FakeRepo, args: string[]): ProcessRunResult => {
   if (repo.head.sha === undefined) return result(128, '', "fatal: ambiguous argument 'HEAD'")
 
   let excluded = new Set<string>()
+  let start = repo.head.sha
   for (const rev of revs) {
     const range = /^(.+)\.\.HEAD$/.exec(rev)
     if (range !== null) {
       if (!repo.commits.has(range[1]!)) return result(128, '', `fatal: bad revision '${rev}'`)
       excluded = ancestors(repo, range[1]!)
+    } else if (repo.commits.has(rev)) {
+      start = rev
     } else if (rev !== 'HEAD') {
       return result(128, '', `fatal: bad revision '${rev}'`)
     }
@@ -132,7 +146,7 @@ const answerLog = (repo: FakeRepo, args: string[]): ProcessRunResult => {
     return isFixed ? ident.includes(author) : new RegExp(author).test(ident)
   }
 
-  const lines = [...ancestors(repo, repo.head.sha)]
+  const lines = [...ancestors(repo, start)]
     .filter(sha => !excluded.has(sha))
     .map(sha => repo.commits.get(sha)!)
     .filter(c => !isNoMerges || c.parents.length < 2)
@@ -157,10 +171,18 @@ const answer = (repo: FakeRepo, args: string[]): ProcessRunResult => {
   if (args[0] === 'log') return answerLog(repo, args.slice(1))
   if (args[0] === 'show') {
     const sha = args.at(-1)!
-    const wanted = ['show', '--no-ext-diff', '--no-textconv', '-w', '--numstat', '--format=', sha].join(' ')
-    if (joined !== wanted) return result(129, '', `fake git: unexpected show ${joined}`)
     const found = repo.commits.get(sha)
-    return found === undefined ? result(128, '', 'fatal: bad object') : result(0, found.numstat)
+    const numstat = ['show', '--no-ext-diff', '--no-textconv', '-w', '--numstat', '--format=', sha].join(' ')
+    const patch = ['show', '--no-ext-diff', '--no-textconv', ...SHOW_COMMIT, sha].join(' ')
+    if (joined !== numstat && joined !== patch) return result(129, '', `fake git: unexpected show ${joined}`)
+    if (found === undefined) return result(128, '', 'fatal: bad object')
+    // real git: the message, the NUL from %x00, two newlines, then the diff (checked in the integration script)
+    return result(0, joined === numstat ? found.numstat : `${found.message}\x00\n\n${found.patch}`)
+  }
+  if (args[0] === 'cat-file' && args[1] === 'blob' && args.length === 3) {
+    const [sha, ...path] = args[2]!.split(':')
+    const content = repo.commits.get(sha!)?.blobs[path.join(':')]
+    return content === undefined ? result(128, '', `fatal: path '${path.join(':')}' does not exist in '${sha}'`) : result(0, content)
   }
   return result(129, '', `fake git: unsupported ${joined}`)
 }
