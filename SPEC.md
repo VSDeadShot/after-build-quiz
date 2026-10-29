@@ -58,7 +58,8 @@ Claude Code update.
    the diff with new-side line numbers, ±30 lines of surrounding code at that commit (the 5 most-changed
    files), the 10 previous commit subjects, and the repo's SPEC.md / AGENTS.md / README.md at that commit;
    each part has a size cap and says what it left out. Secret files (`.env*`, `*.pem`, `*.key`, by name,
-   under their old or new path) never enter it: their diff and contents are listed as omitted. Each
+   under their old or new path) never enter it: their diff and contents are listed as omitted. Lines that
+   look like secrets (listed patterns) are replaced with a marker and can't be cited. Each
    question carries private key points and must cite a `path:line` that is a line of the diff.
    Ungrounded output is regenerated once; a second ungrounded output expires the commit (reason
    `ungrounded`), which `/quiz stats` counts. An API error or timeout is not a refusal: the commit stays
@@ -156,8 +157,14 @@ A rebase made outside Claude Code makes `lastSeen..HEAD` treat the rebased commi
 stay pending; the queue cap bounds the duplicates.
 v2 fixes both with a reachability check, which needs a read-only allow-list addition proposed on its own.
 A crash between the log write and the `active.json` update can log one answer twice.
-Secret filtering is by file name only: a secret committed inside any other file reaches the context pack,
-and a grader gap may quote it into the log.
+Secret filtering is by file name and by line pattern: a secret that matches neither — a key with no
+recognised shape assigned to an unremarkable name, or one split across lines — still reaches the context
+pack, and a grader gap may quote it into the log. Redacted lines can't be cited, so a commit whose main
+change is such a line may fail grounding and expire as `ungrounded`. Known misses: a run-together
+lower-case name such as `apikey = "…"` (names count by word; `APIKEY=…` is caught); an
+`Authorization: Bearer <token>` line whose token has no recognised shape (a JWT or an `sk-` key is caught);
+and a diff hunk inside a long private key that shows neither its BEGIN nor its END line (a partial change
+to the key body).
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

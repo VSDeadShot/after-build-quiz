@@ -49,6 +49,80 @@ const isSecret = (path: string): boolean => {
   return /^\.env/i.test(name) || /\.(pem|key)$/i.test(name)
 }
 
+// A line that looks like a secret is replaced whole, never in place: a partial
+// match could leave the rest of a secret behind (the approach of second-brain's
+// git_history.py). Lines are matched in full, before the display cut, and a
+// redacted line is never citable.
+export const REDACTED = '[line redacted: possible secret]'
+
+const SECRET_PATTERNS = [
+  /AIza[0-9A-Za-z_\-]{35}/, // Google API key
+  /\bsk-[A-Za-z0-9_\-]{20,}/, // OpenAI, Anthropic
+  /BEGIN [A-Z0-9 ]*KEY/, // private key header; secretMask takes the whole block
+  // env/ini line: an upper-case name ending in a secret word (then optional _PARTs) set to 8+ characters
+  /^\s*(?:export\s+)?[A-Z0-9_]{0,64}(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*\s*=\s*["']?[^\s"']{8,}/,
+  /\b[a-z][a-z0-9+.\-]*:\/\/[^/\s:@]+:[^/\s@]+@/i, // credentials in a URL
+  /\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/, // bcrypt hash
+  /\b(?:gh[po]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/, // GitHub
+  /\bAKIA[0-9A-Z]{16}\b/, // AWS access key ID
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/, // Slack
+  /\b[rs]k_live_[A-Za-z0-9]{10,}/, // Stripe
+  /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/, // JWT, incl. Supabase anon/service_role keys
+  /\bsb_secret_[A-Za-z0-9_\-]{10,}/, // Supabase secret key
+]
+
+// A quoted literal of 8+ non-space characters assigned to a secret-looking name, anywhere:
+// `apiKey: "…"`, `password = '…'`, `"token": "…"`, `api_key="…"`, `token := "…"`.
+const ASSIGNED = /(?<![\w$-])["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(["'`])((?:(?!\2)\S){8,})\2/g
+const UPPER_NAME = /^[A-Z0-9_]*(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*$/
+const SECRET_WORD = /^(?:key|secret|password|passwd|token)$/i
+
+// API_KEY, SECRET_KEY_BASE (as 4a); otherwise the last word must be one: apiKey, client_secret, x-api-key
+// (not keyPrefix, secretFiles, monkey).
+const isSecretName = (name: string) =>
+  UPPER_NAME.test(name) || SECRET_WORD.test(name.split(/[_$-]|(?<=[a-z0-9])(?=[A-Z])/).at(-1) ?? '')
+
+export const isSecretLine = (line: string): boolean =>
+  SECRET_PATTERNS.some(pattern => pattern.test(line)) ||
+  [...line.matchAll(ASSIGNED)].some(match => isSecretName(match[1]!))
+
+const BLOCK_BEGIN = /-----BEGIN [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/
+const BLOCK_END = /-----END [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/
+
+// Which lines to redact: each secret-looking line, and every line of a key block. A part
+// (one hunk) can hold part of a block: a BEGIN with no END runs to the part's end, an END
+// with no BEGIN back to its start.
+export const secretMask = (lines: readonly string[]): boolean[] => {
+  const mask = lines.map(isSecretLine)
+  let open: number | undefined
+  let from = 0
+  lines.forEach((line, i) => {
+    if (open === undefined && BLOCK_BEGIN.test(line)) open = i
+    if (BLOCK_END.test(line)) {
+      mask.fill(true, open ?? from, i + 1)
+      open = undefined
+      from = i + 1
+    }
+  })
+  if (open !== undefined) mask.fill(true, open)
+  return mask
+}
+
+// Redacted-line counts by place (a path, `commit message`, `recent commits`, a doc), in first-seen order.
+type Redactions = Map<string, number>
+const note = (redactions: Redactions, place: string, count: number) => {
+  if (count > 0) redactions.set(place, (redactions.get(place) ?? 0) + count)
+}
+const redactedEntries = (redactions: Redactions) =>
+  [...redactions].map(([place, n]) => `${place}: ${n} ${n === 1 ? 'line' : 'lines'} redacted (possible secret)`)
+
+// Whole text (a message, a doc): secret lines replaced, blocks found over all of it.
+const redactText = (lines: readonly string[], place: string, redactions: Redactions) => {
+  const mask = secretMask(lines)
+  note(redactions, place, mask.filter(Boolean).length)
+  return lines.map((line, i) => (mask[i] ? REDACTED : line)).join('\n')
+}
+
 const ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 }
 
 // git's C-style quoting (core.quotePath): octal bytes of UTF-8 and backslash escapes.
@@ -198,8 +272,8 @@ const label = (file: FileDiff) => {
   return `${file.status}, ${counts}`
 }
 
-const renderLine = (file: FileDiff, line: Line) => {
-  const text = cut(line.text, LIMITS.line)
+const renderLine = (file: FileDiff, line: Line, isRedacted: boolean) => {
+  const text = isRedacted ? REDACTED : cut(line.text, LIMITS.line)
   if (line.kind === '-') return `${file.status === 'deleted' ? pad(line.oldLine) : ' '.repeat(5)} - ${text}`
   return `${pad(line.newLine)} ${line.kind} ${text}`
 }
@@ -211,7 +285,14 @@ const lineRef = (file: FileDiff, line: Line): string | undefined => {
 
 type Shown = { file: FileDiff; hunks: Hunk[] }
 
-const renderDiff = (files: FileDiff[], refs: Set<string>, omitted: string[]) => {
+// `@@ -a,b +c,d @@ <label>`: a label that looks like a secret is replaced.
+const renderHeader = (header: string) => {
+  const ranges = HUNK.exec(header)?.[0] ?? ''
+  const isRedacted = isSecretLine(header.slice(ranges.length))
+  return { text: isRedacted ? `${ranges} ${REDACTED}` : cut(header, LIMITS.line), isRedacted }
+}
+
+const renderDiff = (files: FileDiff[], refs: Set<string>, omitted: string[], redactions: Redactions) => {
   const out: string[] = []
   const shown: Shown[] = []
   const notShown: string[] = []
@@ -227,15 +308,18 @@ const renderDiff = (files: FileDiff[], refs: Set<string>, omitted: string[]) => 
     const kept: Hunk[] = []
     let left = 0
     for (const hunk of file.hunks) {
-      const block = [cut(hunk.header, LIMITS.line), ...hunk.lines.map(line => renderLine(file, line))].join('\n')
+      const header = renderHeader(hunk.header)
+      const mask = secretMask(hunk.lines.map(line => line.text))
+      const block = [header.text, ...hunk.lines.map((line, i) => renderLine(file, line, mask[i]!))].join('\n')
       if (left === 0 && used + block.length + 1 <= LIMITS.diff) {
         out.push(block)
         used += block.length + 1
         kept.push(hunk)
-        for (const line of hunk.lines) {
-          const ref = lineRef(file, line)
+        hunk.lines.forEach((line, i) => {
+          const ref = mask[i] ? undefined : lineRef(file, line)
           if (ref !== undefined) refs.add(ref)
-        }
+        })
+        note(redactions, file.path, mask.filter(Boolean).length + (header.isRedacted ? 1 : 0))
       } else {
         left++
       }
@@ -274,7 +358,7 @@ const windowsOf = (hunks: Hunk[], length: number) => {
 }
 
 const renderAround = async (
-  run: Run, top: string, sha: string, shown: Shown[], refs: Set<string>, omitted: string[],
+  run: Run, top: string, sha: string, shown: Shown[], refs: Set<string>, omitted: string[], redactions: Redactions,
 ) => {
   const candidates = shown
     .filter(({ file, hunks }) => hunks.length > 0 && file.status !== 'deleted' && !isNonCode(file.path))
@@ -288,8 +372,9 @@ const renderAround = async (
       continue
     }
     const lines = linesOf(blob)
+    const mask = secretMask(lines) // over the whole blob, so a block is found exactly
     const inDiff = new Set(hunks.flatMap(h => h.lines.filter(l => l.kind !== '-').map(l => l.newLine)))
-    const block: { text: string; ref?: string }[] = []
+    const block: { text: string; ref?: string; isRedacted?: boolean }[] = []
     for (const [start, end] of windowsOf(hunks, lines.length)) {
       let isGap = block.length > 0
       for (let n = start; n <= end; n++) {
@@ -299,11 +384,13 @@ const renderAround = async (
         }
         if (isGap && block.length > 0) block.push({ text: '      …' })
         isGap = false
-        block.push({ text: `${pad(n)} | ${cut(lines[n - 1] ?? '', LIMITS.line)}`, ref: `${file.path}:${n}` })
+        block.push(mask[n - 1]
+          ? { text: `${pad(n)} | ${REDACTED}`, isRedacted: true }
+          : { text: `${pad(n)} | ${cut(lines[n - 1] ?? '', LIMITS.line)}`, ref: `${file.path}:${n}` })
       }
     }
     if (block.length === 0) continue
-    for (const { text, ref } of [{ text: `=== ${file.path}` }, ...block]) {
+    for (const { text, ref, isRedacted } of [{ text: `=== ${file.path}` }, ...block]) {
       if (used + text.length + 1 > LIMITS.around) {
         out.push('[… surrounding code cut at the size limit]')
         omitted.push('surrounding code: cut at the size limit')
@@ -312,6 +399,7 @@ const renderAround = async (
       used += text.length + 1
       out.push(text)
       if (ref !== undefined) refs.add(ref)
+      if (isRedacted === true) note(redactions, file.path, 1)
     }
   }
   return out.join('\n')
@@ -341,7 +429,7 @@ const recentSubjects = async (run: Run, top: string, sha: string): Promise<strin
       .flatMap(line => parseCommitLine(line) ?? [])
       .filter(made => made.hash !== sha)
       .slice(0, RECENT)
-      .map(made => cut(made.subject, LIMITS.subject))
+      .map(made => made.subject)
   } catch {
     return []
   }
@@ -362,9 +450,10 @@ export const buildContextPack = async (
     const diff = split === -1 ? shown.stdout : shown.stdout.slice(split + 1).replace(/^\r?\n+/, '')
 
     const omitted: string[] = []
+    const redactions: Redactions = new Map()
     const diffRefs = new Set<string>()
     const quizzable: FileDiff[] = []
-    const messageText = capped(message, LIMITS.message, 'commit message', omitted)
+    const messageText = capped(redactText(message.split('\n'), 'commit message', redactions), LIMITS.message, 'commit message', omitted)
     if (shown.isStdoutTruncated) omitted.push('diff: the end was cut by the process output limit')
     for (const file of parseDiff(diff)) {
       if (isSecret(file.path) || isSecret(file.oldPath)) omitted.push(`${file.path}: secret file, omitted`)
@@ -377,18 +466,23 @@ export const buildContextPack = async (
       ...quizzable.filter(file => !isNonCode(file.path)).sort(byChange),
       ...quizzable.filter(file => isNonCode(file.path)).sort(byChange),
     ]
-    const renderedDiff = renderDiff(ordered, diffRefs, omitted)
+    const renderedDiff = renderDiff(ordered, diffRefs, omitted, redactions)
 
-    const subjects = await recentSubjects(run, entry.repo, sha)
+    const subjects = (await recentSubjects(run, entry.repo, sha)).map(subject => {
+      if (!isSecretLine(subject)) return cut(subject, LIMITS.subject)
+      note(redactions, 'recent commits', 1)
+      return REDACTED
+    })
     const codeRefs = new Set(diffRefs)
-    const around = await renderAround(run, entry.repo, sha, renderedDiff.shown, codeRefs, omitted)
+    const around = await renderAround(run, entry.repo, sha, renderedDiff.shown, codeRefs, omitted, redactions)
 
     const docs: string[] = []
     for (const name of DOCS) {
       const content = await readBlob(run, entry.repo, `${sha}:${name}`)
       if (content === undefined) continue
-      docs.push(`### ${name}\n${capped(linesOf(content).join('\n'), LIMITS.doc, name, omitted)}`)
+      docs.push(`### ${name}\n${capped(redactText(linesOf(content), name, redactions), LIMITS.doc, name, omitted)}`)
     }
+    omitted.push(...redactedEntries(redactions))
 
     const text = [
       `# Commit ${sha.slice(0, 7)} in ${entry.repoName}`,

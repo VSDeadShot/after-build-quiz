@@ -10,8 +10,9 @@
 // the --since format, detached HEAD. A second throwaway repo, with settings that
 // would change git's output (color, no prefixes, 1 line of context, quoted
 // paths), builds a real context pack: line numbers, renames, deletions, binary,
-// CRLF, quoted and spaced names, secret files, and the `git show` layout the fake
-// reproduces. The engine's own spawn ($.process.run) is covered by the
+// CRLF, quoted and spaced names, secret files, secret lines (a key block in a .ts
+// file; an .env renamed with heavy edits, which git sees as a delete and a new
+// file), and the `git show` layout the fake reproduces. The engine's own spawn ($.process.run) is covered by the
 // scratch-repo run.
 import { execFile, execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -115,6 +116,8 @@ try {
   put('logo.bin', Buffer.from([0, 1, 2, 3, 0, 255]))
   put('.env.production', 'API_TOKEN=tok_live_do_not_leak\n')
   put('certs/server.pem', `-----BEGIN ${'PRIVATE'} KEY-----\nabc\n`) // split so secret scanners do not flag the fixture
+  const stagingToken = `API_TOKEN=${'tok' + '_live_'}staging_do_not_leak` // assembled for the same reason
+  put('.env.staging', `${stagingToken}\n${lines(9, 'STAGING_FLAG')}`)
   put('README.md', '# readme\n')
   setupGit(packRepo, 'add', '-A')
   setupGit(packRepo, 'commit', '-q', '-m', 'root')
@@ -160,6 +163,27 @@ try {
     check('recent subjects come from log <sha>', text.includes('## Recent commits (newest first)\n- root\n'))
     check('docs at the commit: README and SPEC, no AGENTS',
       text.includes('### README.md\n# readme') && text.includes('### SPEC.md\n# spec') && !text.includes('### AGENTS.md'))
+  }
+
+  // Secret lines, in a commit of their own (larger files would push src/a.ts out of the surrounding-code top 5).
+  setupGit(packRepo, 'mv', '.env.staging', 'config.ini')
+  put('config.ini', `[server]\n${lines(9, 'setting')}${stagingToken}\n`) // too changed for git to call it a rename
+  const keyBody = ['MIIEvQ' + 'A'.repeat(58), 'B'.repeat(64), 'C'.repeat(20) + '=']
+  put('src/keys.ts', ['export const pem = `', `-----BEGIN ${'PRIVATE'} KEY-----`, ...keyBody, `-----END ${'PRIVATE'} KEY-----`, '`', ''].join('\n'))
+  setupGit(packRepo, 'add', '-A')
+  setupGit(packRepo, 'commit', '-q', '-m', 'Move settings, add key')
+  const secrets = await buildContextPack(run, { repo: packRepo, repoName: 'pack', hash: setupGit(packRepo, 'rev-parse', 'HEAD') })
+  check(`secret-lines pack is built (${secrets.isBuilt ? 'ok' : secrets.reason})`, secrets.isBuilt)
+  if (secrets.isBuilt) {
+    const { text, diffRefs, codeRefs, omitted } = secrets.pack
+    check('a key block pasted into a .ts file: BEGIN..END redacted, not citable, counted',
+      diffRefs.has('src/keys.ts:1') && diffRefs.has('src/keys.ts:7') &&
+      [2, 3, 4, 5, 6].every(n => !diffRefs.has(`src/keys.ts:${n}`) && !codeRefs.has(`src/keys.ts:${n}`)) &&
+      keyBody.every(line => !text.includes(line)) && omitted.includes('src/keys.ts: 5 lines redacted (possible secret)'))
+    check('an .env renamed with heavy edits: git sees a delete and a new file; its token line redacted',
+      omitted.includes('.env.staging: secret file, omitted') && text.includes('=== config.ini (added, +11 -0)') &&
+      diffRefs.has('config.ini:10') && !diffRefs.has('config.ini:11') &&
+      omitted.includes('config.ini: 1 line redacted (possible secret)') && !text.includes('tok_live'))
   }
 
   const rootPack = await buildContextPack(run, { repo: packRepo, repoName: 'pack', hash: root })
