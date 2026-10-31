@@ -374,6 +374,7 @@ const S = {
   supabase: 'sb' + '_secret_' + 'h8'.repeat(16),
   bcrypt: '$2b' + '$12$' + 'i'.repeat(53),
   token: 'tok' + '_live_' + 'do_not_leak',
+  bearer: 'q7Lm' + 'R2xV'.repeat(5),
 }
 const BEGIN = `-----BEGIN ${'PRIVATE'} KEY-----`
 const END = `-----END ${'PRIVATE'} KEY-----`
@@ -457,8 +458,76 @@ describe('isSecretLine: patterns', () => {
       ['8 the jwt.io sample token in a doc', `Example: ${jwtSample}`],
       ['8 a public Supabase anon key', `const anon = '${jwtSample}'`],
       ['9 an sb_secret_ placeholder in a doc', `SUPABASE_SECRET=${'sb' + '_secret_'}xxxxxxxxxxxxxxxxxxxx`],
+      ['4a an unquoted constant on the right', 'apikey = DEFAULT_APIKEY_VALUE'],
+      ['10 a doc example with a made-up token', 'Authorization: Bearer abcdefghijklmnop'],
     ]
     for (const [name, line] of falsePositives) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('run-together compound names are matched (4b quoted, 4a unquoted)', () => {
+    const positives: [string, string][] = [
+      ['4b apikey =', 'apikey = "abcd1234efgh"'],
+      ['4b apikey:', "apikey: 'abcd1234efgh'"],
+      ['4b quoted JSON name', '"apikey": "abcd1234efgh"'],
+      ['4b prefixed snake_case', 'openai_apikey="abcd1234efgh"'],
+      ['4b header-style name', "'x-apikey': 'abcd1234efgh'"],
+      ['4b camelCase prefix', "const myApikey = 'abcd1234efgh'"],
+      ['4b clientsecret', "  clientsecret: 'abcdefghij',"],
+      ['4b Go short assignment', 'accesstoken := "abcdefghijkl"'],
+      ['4a unquoted lower-case', 'apikey=abcd1234efgh'],
+      ['4a exported, spaced', 'export secretkey = abcd1234efgh'],
+      ['4a prefixed name', 'stripe_webhooksecret=whsec_abcdefgh'],
+      ['4a trailing comment', 'refreshtoken=abcd1234efgh  # rotate monthly'],
+    ]
+    for (const [name, line] of positives) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('Bearer tokens are matched with or without an Authorization name (10)', () => {
+    const positives: [string, string][] = [
+      ['10 bare header', `Authorization: Bearer ${S.bearer}`],
+      ['10 JSON header', `"Authorization": "Bearer ${S.bearer}"`],
+      ['10 curl -H', `curl -H "Authorization: Bearer ${S.bearer}" https://api.example.com/v1/me`],
+      ['10 lower-case, template literal', `fetch(url, { headers: { authorization: \`bearer ${S.bearer}\` } })`],
+      ['10 no Authorization name', `const header = 'Bearer ${S.bearer}'`],
+      ['10 a placeholder, then a real token', `# Bearer <your-access-token>, e.g. Bearer ${S.bearer}`],
+    ]
+    for (const [name, line] of positives) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('the same Bearer line matches on every call (no regex state carried between calls)', () => {
+    const line = `Authorization: Bearer ${S.bearer}`
+    expect([isSecretLine(line), isSecretLine(line), isSecretLine(line)]).toEqual([true, true, true])
+  })
+
+  test('Bearer placeholders and compound look-alike names are not matched', () => {
+    const negatives = [
+      'Authorization: Bearer <your-access-token>',
+      'Authorization: Bearer YOUR_TOKEN',
+      'Authorization: Bearer YOUR_ACCESS_TOKEN_HERE',
+      'curl -H "Authorization: Bearer ${API_ACCESS_TOKEN}"',
+      'curl -H "Authorization: Bearer $GITHUB_ACCESS_TOKEN"',
+      '"Authorization": "Bearer {{api_access_token}}"',
+      'headers = {"Authorization": f"Bearer {settings.API_ACCESS_TOKEN}"}',
+      'Authorization: Bearer xxxxxxxxxxxxxxxxxxxx',
+      'Authorization: Bearer XXXX-XXXX-XXXX-XXXX',
+      'Authorization: Bearer ...',
+      'Authorization: Bearer …',
+      "const header = 'Bearer ' + token",
+      'const header = `Bearer ${token}`',
+      'Bearer authentication is used by the API',
+      'Authorization: Bearer short-token',
+      'const bearer_token = getToken()',
+      "apikeyPrefix = 'abq:queue:'",
+      'apikeys: string[]',
+      'apikey: ApiKeyConfig',
+      'apikey = "short"',
+      'apikey = process.env.APIKEY',
+      'apikey = getKey()',
+      'apikey == expectedApikeyValue',
+      "const turkey = 'roast-dinner'",
+      "hockey: 'stick-and-puck'",
+    ]
+    for (const line of negatives) expect([line, isSecretLine(line)]).toEqual([line, false])
   })
 })
 

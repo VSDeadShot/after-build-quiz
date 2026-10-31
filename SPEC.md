@@ -160,11 +160,10 @@ A crash between the log write and the `active.json` update can log one answer tw
 Secret filtering is by file name and by line pattern: a secret that matches neither — a key with no
 recognised shape assigned to an unremarkable name, or one split across lines — still reaches the context
 pack, and a grader gap may quote it into the log. Redacted lines can't be cited, so a commit whose main
-change is such a line may fail grounding and expire as `ungrounded`. Known misses: a run-together
-lower-case name such as `apikey = "…"` (names count by word; `APIKEY=…` is caught); an
-`Authorization: Bearer <token>` line whose token has no recognised shape (a JWT or an `sk-` key is caught);
-and a diff hunk inside a long private key that shows neither its BEGIN nor its END line (a partial change
-to the key body).
+change is such a line may fail grounding and expire as `ungrounded`. Known misses: a diff hunk inside a
+long private key that shows neither its BEGIN nor its END line (a partial change to the key body); and an
+unquoted YAML-style `name: value` line with a run-together name such as `apikey: abcd1234efgh5678` (a rule
+for it would also flag type annotations such as `apikey: ApiKeyConfig`).
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

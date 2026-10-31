@@ -55,12 +55,22 @@ const isSecret = (path: string): boolean => {
 // redacted line is never citable.
 export const REDACTED = '[line redacted: possible secret]'
 
+// Run-together names that are one word to the 4b split but a secret name to a person: apikey,
+// clientsecret. A fixed list, not prefix + secret word, so monkey, turkey and hockey stay clean.
+const COMPOUND = 'apikey|apisecret|apitoken|secretkey|accesskey|privatekey|authkey|signingkey|encryptionkey|' +
+  'masterkey|authtoken|accesstoken|refreshtoken|sessiontoken|bearertoken|clientsecret|appsecret|' +
+  'consumersecret|webhooksecret'
+const COMPOUND_NAME = new RegExp(`^(?:${COMPOUND})$`, 'i')
+
 const SECRET_PATTERNS = [
   /AIza[0-9A-Za-z_\-]{35}/, // Google API key
   /\bsk-[A-Za-z0-9_\-]{20,}/, // OpenAI, Anthropic
   /BEGIN [A-Z0-9 ]*KEY/, // private key header; secretMask takes the whole block
   // env/ini line: an upper-case name ending in a secret word (then optional _PARTs) set to 8+ characters
   /^\s*(?:export\s+)?[A-Z0-9_]{0,64}(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*\s*=\s*["']?[^\s"']{8,}/,
+  // env line, any case: a compound name (after optional word_ / word- parts) set to an unquoted or quoted
+  // 8+ character value running to the end of the line; `.` and `()` keep `apikey = process.env.X` clean
+  new RegExp(`^\\s*(?:export\\s+)?(?:[A-Za-z0-9]+[_-])*(?:${COMPOUND})\\s*=(?!=)\\s*["']?[A-Za-z0-9_\\-+/=~]{8,}["']?\\s*(?:#.*)?$`, 'i'),
   /\b[a-z][a-z0-9+.\-]*:\/\/[^/\s:@]+:[^/\s@]+@/i, // credentials in a URL
   /\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/, // bcrypt hash
   /\b(?:gh[po]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/, // GitHub
@@ -77,14 +87,26 @@ const ASSIGNED = /(?<![\w$-])["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(["'`
 const UPPER_NAME = /^[A-Z0-9_]*(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*$/
 const SECRET_WORD = /^(?:key|secret|password|passwd|token)$/i
 
-// API_KEY, SECRET_KEY_BASE (as 4a); otherwise the last word must be one: apiKey, client_secret, x-api-key
-// (not keyPrefix, secretFiles, monkey).
-const isSecretName = (name: string) =>
-  UPPER_NAME.test(name) || SECRET_WORD.test(name.split(/[_$-]|(?<=[a-z0-9])(?=[A-Z])/).at(-1) ?? '')
+// API_KEY, SECRET_KEY_BASE (as 4a); otherwise the last word must be one, or a compound: apiKey, client_secret,
+// x-api-key, apikey, openai_apikey (not keyPrefix, secretFiles, monkey, apikeyPrefix).
+const isSecretName = (name: string) => {
+  const last = name.split(/[_$-]|(?<=[a-z0-9])(?=[A-Z])/).at(-1) ?? ''
+  return UPPER_NAME.test(name) || SECRET_WORD.test(last) || COMPOUND_NAME.test(last)
+}
+
+// 10: a Bearer token of 16+ characters, with or without an Authorization name on the line (bare header,
+// JSON header, curl -H). An obvious placeholder is not a secret: <token>, $TOKEN, ${TOKEN}, {{token}},
+// {token}, YOUR_TOKEN, all x's (xxxx-xxxx), or a bare ellipsis.
+const BEARER = /\bbearer\s+([^\s"'`,;)]{16,})/gi
+const PLACEHOLDER = /^(?:[<${]|your[_-]|x+(?:[-_.]x+)*$|(?:\.\.\.|…)$)/i
+
+// matchAll works on a copy of BEARER, so no lastIndex carries over between calls.
+const hasBearerToken = (line: string) => [...line.matchAll(BEARER)].some(match => !PLACEHOLDER.test(match[1]!))
 
 export const isSecretLine = (line: string): boolean =>
   SECRET_PATTERNS.some(pattern => pattern.test(line)) ||
-  [...line.matchAll(ASSIGNED)].some(match => isSecretName(match[1]!))
+  [...line.matchAll(ASSIGNED)].some(match => isSecretName(match[1]!)) ||
+  hasBearerToken(line)
 
 const BLOCK_BEGIN = /-----BEGIN [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/
 const BLOCK_END = /-----END [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/
