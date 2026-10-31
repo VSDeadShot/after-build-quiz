@@ -2,7 +2,7 @@
 
 A Claude Code plugin that quizzes the author on their own commits so they learn from what gets built.
 
-Built against Claude Code 2.1.310 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
+Built against Claude Code 2.1.316 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
 `tsc -p .`, `claude plugin test .`, the grader calibration and the live answer-isolation check after every
 Claude Code update.
 
