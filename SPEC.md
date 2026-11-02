@@ -51,8 +51,9 @@ Claude Code update.
    phrase, do not. Multi-line answers are never held.
 5. **Questions.** Exactly 3, one at a time, in this order, each waiting for an answer:
    - WHY — a decision visible in the diff, interview-style
-   - CONCEPT — the CS fundamental behind the change, grounded in this code, tagged from a fixed vocabulary
+   - CONCEPT — the CS fundamental behind the change, grounded in this code
    - EXPLAIN IT BACK — what the commit does and why it matters, as told to an interviewer
+   Every question, WHY and EXPLAIN included, carries a concept tag from a fixed vocabulary.
    Generated once per quiz (kept in `active.json`) by an isolated, tool-less model call from a context pack
    read from the commit object, never the work tree: the commit message (subject and body, ~2k characters),
    the diff with new-side line numbers, ±30 lines of surrounding code at that commit (the 5 most-changed
@@ -86,12 +87,22 @@ Claude Code update.
    only as transcript notices the model never reads. `/quiz` masks its own arguments at `command.run`
    before the command runs (to an empty string), so no stored row or prompt-history line holds the answer,
    and it answers with no `text` or `context`.
-9. **Log.** Each attempt, graded or ungraded, appends {date, repo, repoName, commit, subject, qtype,
-   concept, question, answer, score, gap, codeRefs} to `<dataDir>/log/YYYY-MM.jsonl`; `score` and `gap`
-   are null when ungraded. The month is the UTC month of `date`. Log writes are crash-safe (the whole month
-   file to `.tmp`, then to the file); a line that does not parse is skipped when read.
-10. **Stats.** Weakest concept tags (avg, n ≥ 2), avg score per question type, pending / expired (by
-    reason) / answered counts, and whether a quiz is paused.
+9. **Log.** Each attempt, graded or ungraded, appends {v, id, date, repo, repoName, commit, subject,
+   qtype, concept, question, answer, score, gap, codeRefs} to `<dataDir>/log/YYYY-MM.jsonl`; `v` is 1;
+   `qtype` is `why`, `concept` or `explain`; `concept` is the question's tag (null if it has none);
+   `score` and `gap` are null when ungraded. `id` names the attempt: the quiz step makes it, and saves it
+   with `date` in `active.json` before the log write, and an `id` already in the file is not appended
+   again. Lines of the answer, gap, question and subject that look like secrets (see 5) are replaced with
+   the marker before they are written; then the answer is cut at 8,000 characters and the question and gap
+   at 2,000, ending in `[… N characters cut]`. The month is the UTC month of `date`. Log writes are
+   crash-safe (the whole month file to `.tmp`, then to the file; a load takes the copy with more valid
+   lines); a line that does not parse is skipped when read. Before a month file with such lines is
+   rewritten, it is copied aside to `log/YYYY-MM.corrupt-<timestamp>.jsonl` and a one-line notice says so;
+   an unreadable one is never overwritten. A write that would take a month file past 3.5 MiB is not made:
+   the attempt is not logged, and a one-line notice says so.
+10. **Stats.** Weakest concept tags across all question types (avg, n ≥ 2), avg score per question type,
+    pending / expired (by reason) / answered (graded attempts) / awaiting-grade (ungraded attempts) counts,
+    and whether a quiz is paused. Averages use graded attempts only.
 
 ## Storage
 `dataDir` defaults to `%USERPROFILE%\.after-build-quiz\` (fallback `$HOME`). Holds `queue.json`,
@@ -156,7 +167,6 @@ those unreachable commits stay pending.
 A rebase made outside Claude Code makes `lastSeen..HEAD` treat the rebased commits as new while the old ones
 stay pending; the queue cap bounds the duplicates.
 v2 fixes both with a reachability check, which needs a read-only allow-list addition proposed on its own.
-A crash between the log write and the `active.json` update can log one answer twice.
 Secret filtering is by file name and by line pattern: a secret that matches neither — a key with no
 recognised shape assigned to an unremarkable name, or one split across lines — still reaches the context
 pack, and a grader gap may quote it into the log. Redacted lines can't be cited, so a commit whose main
@@ -164,6 +174,8 @@ change is such a line may fail grounding and expire as `ungrounded`. Known misse
 long private key that shows neither its BEGIN nor its END line (a partial change to the key body); and an
 unquoted YAML-style `name: value` line with a run-together name such as `apikey: abcd1234efgh5678` (a rule
 for it would also flag type annotations such as `apikey: ApiKeyConfig`).
+Assignment-style secrets inside a sentence, e.g. `pasted API_TOKEN=tok_live_… here`, are not redacted yet,
+in the context pack or the log: the assignment rule only matches a line that starts with the name.
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

@@ -29,6 +29,8 @@ work.
 - Grading prompts must not be softened to raise scores. Any change to the grader prompt, rubric or model
   requires a calibration run, with results reported before commit.
 - `after-build-quiz-proposal.md` is a private working doc: gitignored, never committed.
+- Never cast to `SafeDataDir`; the only constructor is `safeDataDirOf` in `hooks/paths.ts`. The brand is an
+  accident guard, not a security boundary. `node tests/integration/safe-data-dir-casts.mjs` enforces it.
 
 ## Dev loop
 - `claude plugin validate .` after every change; `tsc -p .`; `claude plugin test .`
@@ -39,6 +41,8 @@ work.
   other substitute tsconfig. If the repo config fails, that is a real failure, not something to work around.
 - Integration: `node tests/integration/git-cat-file.mjs` (real throwaway repo in the OS temp folder; Node 24
   runs hooks/*.ts directly). `claude plugin test` has no processes, so real-git checks live here.
+  Also `node tests/integration/safe-data-dir-casts.mjs [folder]` (source scan; the test environment has no
+  file system); isolated checks pass it the export.
 - Calibration: `claude -p "/quiz calibrate" --plugin-dir .` with `devMode` on (costs real model calls;
   run when the grader changes and after Claude Code updates).
 - Manual runs: `claude --plugin-dir "<this folder>"` from a scratch repo under

@@ -9,6 +9,12 @@ export type HomeEnv = { USERPROFILE?: string; HOME?: string }
 // isInsideRepo tells a real refusal (tell the user once) from "could not check" (try again later).
 export type DataDirVerdict = { isSafe: true } | { isSafe: false; isInsideRepo: boolean; reason: string }
 
+// A data folder that checkDataDir found outside any repo. Only safeDataDirOf makes one, and it needs a
+// safe verdict, so code that writes quiz data (log.ts) cannot be handed an unchecked path.
+declare const safe: unique symbol
+export type SafeDataDir = string & { readonly [safe]: true }
+export const safeDataDirOf = (dataDir: string, _verdict: { isSafe: true }): SafeDataDir => dataDir as SafeDataDir
+
 const FOLDER = '.after-build-quiz'
 
 export const toForwardSlashes = (path: string): string => {

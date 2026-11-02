@@ -2,8 +2,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { detectCommits, parseCommit } from './detect.ts'
 import type { DetectInput } from './detect.ts'
-import { checkDataDir, resolveDataDir } from './paths.ts'
-import type { DataDirVerdict } from './paths.ts'
+import { checkDataDir, resolveDataDir, safeDataDirOf } from './paths.ts'
+import type { DataDirVerdict, SafeDataDir } from './paths.ts'
 import { loadQueue, statusText } from './queue.ts'
 import type { QueueIO } from './queue.ts'
 import { readSettings } from './settings.ts'
@@ -62,7 +62,7 @@ async function isoNow($: EngineInterface): Promise<string> {
 
 // The data folder, once it is known to be outside any repo; undefined means
 // do not write (told once if it is inside a repo, retried if it could not be checked).
-async function safeDataDir($: EngineInterface, state: State): Promise<string | undefined> {
+async function safeDataDir($: EngineInterface, state: State): Promise<SafeDataDir | undefined> {
   const dataDir = await dataDirOf($, state)
   const verdict = state.dataDirVerdict ?? await checkDataDir(dataDir, {
     run: (argv, init) => $.process.run(argv, init),
@@ -78,7 +78,7 @@ async function safeDataDir($: EngineInterface, state: State): Promise<string | u
     return undefined
   }
   state.dataDirVerdict = verdict
-  return dataDir
+  return safeDataDirOf(dataDir, verdict)
 }
 
 async function detectAfter($: EngineInterface, state: State, input: Omit<DetectInput, 'now'>) {

@@ -138,6 +138,14 @@ const note = (redactions: Redactions, place: string, count: number) => {
 const redactedEntries = (redactions: Redactions) =>
   [...redactions].map(([place, n]) => `${place}: ${n} ${n === 1 ? 'line' : 'lines'} redacted (possible secret)`)
 
+// The same rule for text kept outside the pack (the log): each secret-looking line, and every line of a
+// key block, replaced whole. Building the pack does not use it.
+export const redactLines = (text: string): { text: string; count: number } => {
+  const lines = text.split('\n')
+  const mask = secretMask(lines.map(line => line.replace(/\r$/, '')))
+  return { text: lines.map((line, i) => (mask[i] ? REDACTED : line)).join('\n'), count: mask.filter(Boolean).length }
+}
+
 // Whole text (a message, a doc): secret lines replaced, blocks found over all of it.
 const redactText = (lines: readonly string[], place: string, redactions: Redactions) => {
   const mask = secretMask(lines)
