@@ -1,8 +1,9 @@
+import { peekActive } from './active.ts'
 import { git } from './git.ts'
 import type { Run } from './git.ts'
 import { isAbsolute, normalizeDir } from './paths.ts'
 import { COMMIT_FORMAT, enqueue, loadQueue, parseCommitLine, saveQueue } from './queue.ts'
-import type { Queue, QueueEntry, QueueIO } from './queue.ts'
+import type { CommitRef, Queue, QueueEntry, QueueIO } from './queue.ts'
 import { classify } from './trivial.ts'
 
 // Spots a `git commit` inside a Bash or PowerShell command line. A false match
@@ -187,7 +188,20 @@ type ParsedLogCommit = NonNullable<ReturnType<typeof parseCommitLine>>
 
 const repoName = (top: string): string => top.split('/').filter(part => part !== '').at(-1) ?? top
 
-// show → classify → enqueue, for each commit worth a quiz.
+// The commit of the quiz in progress, active or paused, in whichever session: the cap must not
+// evict it (SPEC 3). Reading only. No file, a corrupt one or an unreadable one: nothing is known,
+// so nothing is protected, and nothing is written, copied aside or reported from here.
+export const quizCommit = async (io: QueueIO, dataDir: string): Promise<CommitRef | undefined> => {
+  try {
+    const { quiz } = await peekActive(io, dataDir)
+    return quiz === null ? undefined : { repo: quiz.commit.repo, hash: quiz.commit.hash }
+  } catch {
+    return undefined
+  }
+}
+
+// show → classify → enqueue, for each commit worth a quiz. `keepWhenFull` names the commit the cap
+// must spare; it is asked once, and only when the queue is full (the only time the cap can evict).
 export const queueWorthy = async (
   run: Run,
   top: string,
@@ -199,15 +213,22 @@ export const queueWorthy = async (
     minChangedLines: number
     queueCap: number
     isAmend: (made: ParsedLogCommit) => boolean
+    keepWhenFull?: () => Promise<CommitRef | undefined>
   },
 ): Promise<{ queue: Queue; queued: number }> => {
   let next = queue
   let queued = 0
+  let keep: CommitRef | undefined
+  let isKeepAsked = false
   for (const made of commits) {
     const shown = await git(run, top, ['show', '-w', '--numstat', '--format=', made.hash])
     if (shown.exitCode !== 0) continue
     const verdict = classify(shown.stdout, made.parents.length, options.minChangedLines)
     if (verdict.kind !== 'queue') continue
+    if (!isKeepAsked && next.pending.length >= options.queueCap) {
+      isKeepAsked = true
+      keep = await options.keepWhenFull?.()
+    }
     next = enqueue(next, {
       repo: top,
       repoName: repoName(top),
@@ -219,7 +240,7 @@ export const queueWorthy = async (
       source: options.source,
       codeLines: verdict.codeLines,
       codeFiles: verdict.codeFiles,
-    }, { isAmend: options.isAmend(made), cap: options.queueCap, now: options.now })
+    }, { isAmend: options.isAmend(made), cap: options.queueCap, now: options.now, ...(keep === undefined ? {} : { keep }) })
     queued++
   }
   return { queue: next, queued }
@@ -281,6 +302,7 @@ const detect = async (deps: DetectDeps, input: DetectInput): Promise<DetectOutco
     minChangedLines: deps.minChangedLines,
     queueCap: deps.queueCap,
     isAmend: () => command.isAmend,
+    keepWhenFull: () => quizCommit(io, dataDir),
   })
   const saved = await saveQueue(io, dataDir, markSeen(queue, head, input.now))
   return withNotice(saved.isSaved ? { queued, queue: saved.queue } : { queued })

@@ -43,8 +43,10 @@ export const world = (
   let isCwdBroken = false
   let isFsBroken = false
   let isSessionIdBroken = false
-  const fsCall = () => {
+  const touched: string[] = [] // every path a file call named, in order
+  const fsCall = (path: string) => {
     order.push('fs')
+    touched.push(slash(path))
     if (isFsBroken) throw new Error('EIO: fs unavailable')
   }
 
@@ -63,9 +65,9 @@ export const world = (
     if (isGitBroken) throw new Error('spawn git ENOENT')
     return { value: await git.run(e.argv, e.init) }
   })
-  on('fs.exists', async ($, e) => { fsCall(); return { value: DIRS.has(slash(e.path)) || (await fs.io.exists(slash(e.path))) } })
-  on('fs.read', async ($, e) => { fsCall(); return { value: await fs.io.read(slash(e.path)) } })
-  on('fs.write', async ($, e) => { fsCall(); await fs.io.write(slash(e.path), e.text); return { value: undefined } })
+  on('fs.exists', async ($, e) => { fsCall(e.path); return { value: DIRS.has(slash(e.path)) || (await fs.io.exists(slash(e.path))) } })
+  on('fs.read', async ($, e) => { fsCall(e.path); return { value: await fs.io.read(slash(e.path)) } })
+  on('fs.write', async ($, e) => { fsCall(e.path); await fs.io.write(slash(e.path), e.text); return { value: undefined } })
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { logs.push({ text: e.text, to: e.to }); return { value: undefined } })
   on('tool.call', () => {
@@ -93,7 +95,7 @@ export const world = (
     await clock.settle()
   }
   return {
-    git, fs, order, statuses, logs, prompts, clock, settle,
+    git, fs, order, touched, statuses, logs, prompts, clock, settle,
     toolRuns: () => toolRuns,
     endRuns: () => endRuns,
     breakGit: () => { isGitBroken = true },

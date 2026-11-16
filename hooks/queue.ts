@@ -17,7 +17,11 @@ export type QueueEntry = {
   source: 'claude-code' | 'sweep'
   codeLines: number
   codeFiles: number
+  skippedAt?: string // when `/quiz skip` last passed it over; absent: never skipped
 }
+
+// A commit by where it lives: the same hash in another repo is another commit.
+export type CommitRef = { repo: string; hash: string }
 
 export type ExpiredEntry = {
   repo: string
@@ -107,7 +111,7 @@ const expire = (
 export const enqueue = (
   queue: Queue,
   entry: QueueEntry,
-  options: { isAmend: boolean; cap: number; now: string },
+  options: { isAmend: boolean; cap: number; now: string; keep?: CommitRef },
 ): Queue => {
   if (queue.pending.some(pending => pending.hash === entry.hash)) return queue
 
@@ -116,20 +120,44 @@ export const enqueue = (
     ? queue.pending.filter(pending => !(pending.repo === entry.repo && pending.parent === entry.parent))
     : queue.pending
 
+  // Over the cap the oldest goes, except `keep`, the commit of the quiz in progress: then the
+  // next-oldest goes instead (SPEC 3). The cap still holds, so the new commit itself may be the one.
   let next: Queue = { ...queue, pending: [...kept, entry].sort(byCommitTime) }
-  while (next.pending.length > options.cap) next = expire(next, next.pending[0]!, 'cap', options.now)
+  while (next.pending.length > options.cap) {
+    const oldest = next.pending.find(pending => !isCommit(pending, options.keep))
+    if (oldest === undefined) break
+    next = expire(next, oldest, 'cap', options.now)
+  }
   return next
 }
 
-// Newest pending commit that still exists. Missing ones expire on the way;
-// the one returned stays pending (a skipped quiz is still there next time).
-export const selectNewest = async (
+const isCommit = (entry: QueueEntry, commit: CommitRef | undefined): boolean =>
+  commit !== undefined && entry.repo === commit.repo && entry.hash === commit.hash
+
+// `/quiz skip`: the commit stays pending but ranks behind the ones never skipped (see selectNext).
+export const markSkipped = (queue: Queue, commit: CommitRef, now: string): Queue =>
+  queue.pending.some(entry => isCommit(entry, commit))
+    ? { ...queue, pending: queue.pending.map(entry => (isCommit(entry, commit) ? { ...entry, skippedAt: now } : entry)) }
+    : queue
+
+// The order /quiz tries pending commits in: the ones never skipped, newest first; then the skipped
+// ones, the one skipped longest ago first (skipped at the same moment: the newest commit first).
+const pickOrder = (pending: readonly QueueEntry[]): QueueEntry[] => [
+  ...pending.filter(entry => entry.skippedAt === undefined).reverse(),
+  ...pending
+    .filter(entry => entry.skippedAt !== undefined)
+    .sort((a, b) => timeOf(a.skippedAt!) - timeOf(b.skippedAt!) || byCommitTime(b, a)),
+]
+
+// The next pending commit to quiz, in pick order, that still exists. Missing ones expire on the
+// way; the one returned stays pending (a skipped quiz is still there next time).
+export const selectNext = async (
   queue: Queue,
   check: { run: Run; exists: Exists },
   now: string,
 ): Promise<{ queue: Queue; entry?: QueueEntry }> => {
   let current = queue
-  for (const candidate of [...queue.pending].reverse()) {
+  for (const candidate of pickOrder(queue.pending)) {
     try {
       if (!(await check.exists(candidate.repo))) {
         current = expire(current, candidate, 'missing', now, 'repo folder not found')
@@ -151,7 +179,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isEntry = (value: unknown): boolean =>
   isRecord(value) &&
   typeof value.repo === 'string' && typeof value.hash === 'string' && typeof value.committedAt === 'string' &&
-  (typeof value.parent === 'string' || value.parent === null)
+  (typeof value.parent === 'string' || value.parent === null) &&
+  (value.skippedAt === undefined || typeof value.skippedAt === 'string')
 
 const isQueue = (value: unknown): value is Queue =>
   isRecord(value) &&

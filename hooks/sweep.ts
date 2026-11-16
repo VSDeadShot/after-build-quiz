@@ -1,10 +1,10 @@
-import { authorArgs, commitsIn, findHead, logMine, markSeen, queueWorthy, sightingKey } from './detect.ts'
+import { authorArgs, commitsIn, findHead, logMine, markSeen, queueWorthy, quizCommit, sightingKey } from './detect.ts'
 import type { Head } from './detect.ts'
 import type { Run } from './git.ts'
 import { isAbsolute, normalizeDir } from './paths.ts'
 import type { Exists } from './paths.ts'
 import { loadQueue, oneLine, saveQueue } from './queue.ts'
-import type { Queue, QueueIO } from './queue.ts'
+import type { CommitRef, Queue, QueueIO } from './queue.ts'
 
 // The session-start catch-up for commits made outside Claude Code (terminal,
 // IDE): for the session repo and the most recently active known repos, take
@@ -54,6 +54,9 @@ export const sweepRepos = async (deps: SweepDeps, input: SweepInput): Promise<Sw
     let queue = loaded.queue
     let queued = 0
     let isChanged = false
+    // the commit the cap must spare: read once per sweep, and only if a repo fills the queue
+    let kept: Promise<CommitRef | undefined> | undefined
+    const keepWhenFull = () => (kept ??= quizCommit(io, dataDir))
 
     const sweepOne = async (head: Head, isSession: boolean) => {
       const mark = () => {
@@ -78,6 +81,7 @@ export const sweepRepos = async (deps: SweepDeps, input: SweepInput): Promise<Sw
         minChangedLines: deps.minChangedLines,
         queueCap: deps.queueCap,
         isAmend: made => replaced !== undefined && made.parents[0] === replaced.parent,
+        keepWhenFull,
       })
       queue = result.queue
       queued += result.queued

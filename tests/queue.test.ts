@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { Run } from '../hooks/git.ts'
 import type { Exists } from '../hooks/paths.ts'
 import {
-  COMMIT_FORMAT, emptyQueue, enqueue, loadQueue, parseCommitLine, saveQueue, selectNewest,
+  COMMIT_FORMAT, emptyQueue, enqueue, loadQueue, markSkipped, parseCommitLine, saveQueue, selectNext,
 } from '../hooks/queue.ts'
 import type { Queue, QueueEntry, QueueIO } from '../hooks/queue.ts'
 
@@ -120,6 +120,146 @@ describe('enqueue', () => {
   })
 })
 
+describe("enqueue: the commit of the quiz in progress is never evicted by the cap", () => {
+  // ten pending, days 1–10, oldest first
+  const full = () => {
+    const entries = Array.from({ length: 10 }, (_, i) => entry({ committedAt: at(i + 1) }))
+    let queue = emptyQueue()
+    for (const one of entries) queue = enqueue(queue, one, opts)
+    return { entries, queue }
+  }
+  const refOf = (one: QueueEntry) => ({ repo: one.repo, hash: one.hash })
+
+  test('the quiz commit is the oldest: the next-oldest is evicted instead, and the cap holds', () => {
+    const { entries, queue } = full()
+    const next = enqueue(queue, entry({ committedAt: at(11) }), { ...opts, keep: refOf(entries[0]!) })
+    expect(next.pending.length).toBe(10)
+    expect(next.pending[0]).toEqual(entries[0])
+    expect(next.pending.map(e => e.hash)).not.toContain(entries[1]!.hash)
+    expect(next.expired).toEqual([{
+      repo: entries[1]!.repo, repoName: 'foo', hash: entries[1]!.hash, subject: entries[1]!.subject,
+      reason: 'cap', expiredAt: NOW,
+    }])
+  })
+
+  test('the quiz commit is not the oldest: the oldest is evicted as usual', () => {
+    const { entries, queue } = full()
+    const next = enqueue(queue, entry({ committedAt: at(11) }), { ...opts, keep: refOf(entries[5]!) })
+    expect(next.expired.map(e => e.hash)).toEqual([entries[0]!.hash])
+    expect(next.pending.map(e => e.hash)).toContain(entries[5]!.hash)
+  })
+
+  test('cap 1 with the quiz commit pending: the new commit is the one that expires', () => {
+    const quiz = entry({ committedAt: at(1) })
+    const queue = enqueue(emptyQueue(), quiz, { ...opts, cap: 1 })
+    const arrived = entry({ committedAt: at(2) })
+    const next = enqueue(queue, arrived, { ...opts, cap: 1, keep: refOf(quiz) })
+    expect(next.pending).toEqual([quiz])
+    expect(next.expired.map(e => e.hash)).toEqual([arrived.hash])
+  })
+
+  test('a cap lowered by several: evicts down to the cap, oldest first, around the kept commit', () => {
+    const entries = Array.from({ length: 6 }, (_, i) => entry({ committedAt: at(i + 1) }))
+    let queue = emptyQueue()
+    for (const one of entries) queue = enqueue(queue, one, opts)
+    const arrived = entry({ committedAt: at(7) })
+    const next = enqueue(queue, arrived, { ...opts, cap: 3, keep: refOf(entries[0]!) })
+    expect(next.pending.map(e => e.hash)).toEqual([entries[0]!.hash, entries[5]!.hash, arrived.hash])
+    expect(next.expired.map(e => e.hash)).toEqual(entries.slice(1, 5).map(e => e.hash))
+  })
+
+  test('an older commit queued late while the quiz commit is the oldest pending: the late one is evicted', () => {
+    const { entries, queue } = full()
+    const late = entry({ committedAt: '2026-08-01T10:00:00+05:30', source: 'sweep' })
+    const kept = entry({ committedAt: '2026-08-02T10:00:00+05:30' })
+    const withQuiz = enqueue({ ...queue, pending: queue.pending.slice(1) }, kept, opts)
+    const next = enqueue(withQuiz, late, { ...opts, keep: refOf(kept) })
+    expect(next.expired.map(e => e.hash)).toEqual([late.hash])
+    expect(next.pending[0]).toEqual(kept)
+    void entries
+  })
+
+  test('the same hash in another repo is not the quiz commit', () => {
+    const { entries, queue } = full()
+    const next = enqueue(queue, entry({ committedAt: at(11) }), { ...opts, keep: { repo: 'C:/work/bar', hash: entries[0]!.hash } })
+    expect(next.expired.map(e => e.hash)).toEqual([entries[0]!.hash])
+  })
+
+  test('a kept commit that is not pending changes nothing', () => {
+    const { entries, queue } = full()
+    const next = enqueue(queue, entry({ committedAt: at(11) }), { ...opts, keep: { repo: 'C:/work/foo', hash: 'f'.repeat(40) } })
+    expect(next.expired.map(e => e.hash)).toEqual([entries[0]!.hash])
+  })
+
+  test('an amend of the quiz commit replaces its pending entry as usual; nothing is expired', () => {
+    const quiz = entry({ committedAt: at(1) })
+    const queue = enqueue(emptyQueue(), quiz, opts)
+    const amended = entry({ parent: quiz.parent, committedAt: at(2) })
+    const next = enqueue(queue, amended, { ...opts, isAmend: true, keep: refOf(quiz) })
+    expect(next.pending).toEqual([amended])
+    expect(next.expired).toEqual([])
+  })
+})
+
+describe('markSkipped', () => {
+  const LATER = '2026-10-11T09:00:00.000Z'
+  const three = () => {
+    const entries = [entry({ committedAt: at(1) }), entry({ committedAt: at(2) }), entry({ committedAt: at(3) })]
+    let queue = emptyQueue()
+    for (const one of entries) queue = enqueue(queue, one, opts)
+    return { entries, queue }
+  }
+
+  test('marks that pending entry with the time, and nothing else', () => {
+    const { entries, queue } = three()
+    const next = markSkipped(queue, { repo: entries[1]!.repo, hash: entries[1]!.hash }, NOW)
+    expect(next).toEqual({ ...queue, pending: [entries[0], { ...entries[1], skippedAt: NOW }, entries[2]] })
+  })
+
+  test('skipping it again records the later time', () => {
+    const { entries, queue } = three()
+    const ref = { repo: entries[1]!.repo, hash: entries[1]!.hash }
+    const next = markSkipped(markSkipped(queue, ref, NOW), ref, LATER)
+    expect(next.pending[1]!.skippedAt).toBe(LATER)
+  })
+
+  test('a commit that is not pending changes nothing', () => {
+    const { queue } = three()
+    expect(markSkipped(queue, { repo: 'C:/work/foo', hash: 'f'.repeat(40) }, NOW)).toBe(queue)
+  })
+
+  test('the same hash in another repo changes nothing', () => {
+    const { entries, queue } = three()
+    expect(markSkipped(queue, { repo: 'C:/work/bar', hash: entries[1]!.hash }, NOW)).toBe(queue)
+  })
+
+  test('the queue it was given is not changed', () => {
+    const { entries, queue } = three()
+    const before = JSON.stringify(queue)
+    markSkipped(queue, { repo: entries[1]!.repo, hash: entries[1]!.hash }, NOW)
+    expect(JSON.stringify(queue)).toBe(before)
+  })
+
+  test('an amend that replaces a skipped commit queues the new one unskipped', () => {
+    const { entries, queue } = three()
+    const skipped = markSkipped(queue, { repo: entries[2]!.repo, hash: entries[2]!.hash }, NOW)
+    const amended = entry({ parent: entries[2]!.parent, committedAt: at(4) })
+    const next = enqueue(skipped, amended, { ...opts, isAmend: true })
+    expect(next.pending.at(-1)).toEqual(amended)
+    expect(next.pending.some(e => e.skippedAt !== undefined)).toBe(false)
+  })
+
+  test('the cap ignores the mark: the oldest commit is evicted, skipped or not', () => {
+    const entries = Array.from({ length: 10 }, (_, i) => entry({ committedAt: at(i + 1) }))
+    let queue = emptyQueue()
+    for (const one of entries) queue = enqueue(queue, one, opts)
+    queue = markSkipped(queue, { repo: entries[9]!.repo, hash: entries[9]!.hash }, NOW)
+    const next = enqueue(queue, entry({ committedAt: at(11) }), opts)
+    expect(next.expired.map(e => e.hash)).toEqual([entries[0]!.hash])
+    expect(next.pending.find(e => e.hash === entries[9]!.hash)!.skippedAt).toBe(NOW)
+  })
+})
+
 describe('enqueue: --amend', () => {
   test('same repo + same parent + isAmend replaces the pending entry', () => {
     const original = entry({ parent: 'p'.repeat(40), committedAt: at(1) })
@@ -190,7 +330,7 @@ describe('parseCommitLine: committer date, not author date', () => {
   })
 })
 
-describe('selectNewest', () => {
+describe('selectNext', () => {
   const recordingCheck = (missing: Set<string> = new Set(), goneRepos: Set<string> = new Set()) => {
     const calls: (readonly string[])[] = []
     const run: Run = async argv => {
@@ -210,7 +350,7 @@ describe('selectNewest', () => {
   test('returns the newest pending entry and asks git exactly once, through git.ts', async () => {
     const { newer, queue } = twoQueued()
     const { check, calls } = recordingCheck()
-    const picked = await selectNewest(queue, check, NOW)
+    const picked = await selectNext(queue, check, NOW)
     expect(picked.entry).toEqual(newer)
     expect(calls).toEqual([['git', '-C', newer.repo, '--no-pager', 'cat-file', '-e', `${newer.hash}^{commit}`]])
   })
@@ -218,8 +358,8 @@ describe('selectNewest', () => {
   test('selecting does not remove: a skipped quiz is still pending next time', async () => {
     const { newer, queue } = twoQueued()
     const { check } = recordingCheck()
-    const first = await selectNewest(queue, check, NOW)
-    const second = await selectNewest(first.queue, check, NOW)
+    const first = await selectNext(queue, check, NOW)
+    const second = await selectNext(first.queue, check, NOW)
     expect(second.entry).toEqual(newer)
     expect(second.queue.pending.length).toBe(2)
   })
@@ -227,7 +367,7 @@ describe('selectNewest', () => {
   test('a missing commit moves to expired (missing) and the next newest is returned', async () => {
     const { older, newer, queue } = twoQueued()
     const { check } = recordingCheck(new Set([newer.hash]))
-    const picked = await selectNewest(queue, check, NOW)
+    const picked = await selectNext(queue, check, NOW)
     expect(picked.entry).toEqual(older)
     expect(picked.queue.pending).toEqual([older])
     expect(picked.queue.expired).toEqual([{
@@ -240,7 +380,7 @@ describe('selectNewest', () => {
   test('a repo folder that is gone expires its entries without running git', async () => {
     const { older, newer, queue } = twoQueued()
     const { check, calls } = recordingCheck(new Set(), new Set([newer.repo]))
-    const picked = await selectNewest(queue, check, NOW)
+    const picked = await selectNext(queue, check, NOW)
     expect(picked.entry).toBeUndefined()
     expect(picked.queue.expired.map(e => e.detail)).toEqual(['repo folder not found', 'repo folder not found'])
     expect(picked.queue.pending).toEqual([])
@@ -251,7 +391,7 @@ describe('selectNewest', () => {
   test('when everything is missing, nothing is returned', async () => {
     const { older, newer, queue } = twoQueued()
     const { check } = recordingCheck(new Set([older.hash, newer.hash]))
-    const picked = await selectNewest(queue, check, NOW)
+    const picked = await selectNext(queue, check, NOW)
     expect(picked.entry).toBeUndefined()
     expect(picked.queue.pending).toEqual([])
   })
@@ -259,7 +399,7 @@ describe('selectNewest', () => {
   test('if git cannot run, the entry is kept and returned (never expired on uncertainty)', async () => {
     const { newer, queue } = twoQueued()
     const run: Run = async () => { throw new Error('spawn git ENOENT') }
-    const picked = await selectNewest(queue, { run, exists: async () => true }, NOW)
+    const picked = await selectNext(queue, { run, exists: async () => true }, NOW)
     expect(picked.entry).toEqual(newer)
     expect(picked.queue.pending.length).toBe(2)
     expect(picked.queue.expired).toEqual([])
@@ -267,7 +407,92 @@ describe('selectNewest', () => {
 
   test('an empty queue returns nothing', async () => {
     const { check } = recordingCheck()
-    expect((await selectNewest(emptyQueue(), check, NOW)).entry).toBeUndefined()
+    expect((await selectNext(emptyQueue(), check, NOW)).entry).toBeUndefined()
+  })
+})
+
+describe('selectNext: skipped commits rank behind unskipped ones', () => {
+  const checkOf = (missing: string[] = []) => {
+    const calls: string[] = []
+    const run: Run = async argv => {
+      const hash = String(argv.at(-1)).replace('^{commit}', '')
+      calls.push(hash)
+      const isMissing = missing.includes(hash)
+      return { exitCode: isMissing ? 128 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    }
+    return { check: { run, exists: (async () => true) as Exists }, calls }
+  }
+  const T1 = '2026-10-11T09:00:00.000Z'
+  const T2 = '2026-10-12T09:00:00.000Z'
+  const T3 = '2026-10-13T09:00:00.000Z'
+  // three pending, days 1–3; `skips` maps a day to when it was skipped
+  const queued = (skips: Record<number, string> = {}) => {
+    const entries = [1, 2, 3].map(day => entry({ committedAt: at(day) }))
+    let queue = emptyQueue()
+    for (const one of entries) queue = enqueue(queue, one, opts)
+    for (const [day, when] of Object.entries(skips)) {
+      const one = entries[Number(day) - 1]!
+      queue = markSkipped(queue, { repo: one.repo, hash: one.hash }, when)
+    }
+    const [day1, day2, day3] = queue.pending as [QueueEntry, QueueEntry, QueueEntry]
+    return { queue, day1, day2, day3 }
+  }
+
+  test('an unskipped commit is picked over a newer skipped one', async () => {
+    const { queue, day2 } = queued({ 3: T1 })
+    expect((await selectNext(queue, checkOf().check, NOW)).entry).toEqual(day2)
+  })
+
+  test('among unskipped commits the newest is still picked', async () => {
+    const { queue, day3 } = queued({ 1: T1 })
+    expect((await selectNext(queue, checkOf().check, NOW)).entry).toEqual(day3)
+  })
+
+  test('only skipped ones left: the one skipped longest ago is picked, whatever its commit date', async () => {
+    const { queue, day2 } = queued({ 1: T2, 2: T1, 3: T3 })
+    expect((await selectNext(queue, checkOf().check, NOW)).entry).toEqual(day2)
+  })
+
+  test('skipped at the same moment: the newest commit is picked', async () => {
+    const { queue, day3 } = queued({ 1: T1, 2: T1, 3: T1 })
+    expect((await selectNext(queue, checkOf().check, NOW)).entry).toEqual(day3)
+  })
+
+  test('skipping the picked one again moves it behind the other skipped ones', async () => {
+    const { queue, day1, day2 } = queued({ 1: T2, 2: T1, 3: T3 })
+    const again = markSkipped(queue, { repo: day2.repo, hash: day2.hash }, '2026-10-14T09:00:00.000Z')
+    expect((await selectNext(again, checkOf().check, NOW)).entry).toEqual(day1)
+  })
+
+  test('the whole order is asked of git in turn: unskipped newest first, then skipped oldest-skip first', async () => {
+    const { queue, day1, day2, day3 } = queued({ 1: T2, 3: T1 })
+    const { check, calls } = checkOf([day1.hash, day2.hash, day3.hash])
+    const picked = await selectNext(queue, check, NOW)
+    expect(picked.entry).toBeUndefined()
+    expect(calls).toEqual([day2.hash, day3.hash, day1.hash])
+    expect(picked.queue.expired.map(e => e.hash)).toEqual([day2.hash, day3.hash, day1.hash])
+  })
+
+  test('a missing unskipped commit expires and the first skipped one is returned, still marked', async () => {
+    const { queue, day2, day3 } = queued({ 3: T1, 1: T2 })
+    const picked = await selectNext(queue, checkOf([day2.hash]).check, NOW)
+    expect(picked.entry).toEqual(day3)
+    expect(picked.entry!.skippedAt).toBe(T1)
+    expect(picked.queue.pending.length).toBe(2)
+  })
+
+  test('if git cannot run, the first in pick order is kept and returned', async () => {
+    const { queue, day2 } = queued({ 3: T1 })
+    const run: Run = async () => { throw new Error('spawn git ENOENT') }
+    const picked = await selectNext(queue, { run, exists: async () => true }, NOW)
+    expect(picked.entry).toEqual(day2)
+    expect(picked.queue.expired).toEqual([])
+  })
+
+  test('selecting changes neither the marks nor the stored order', async () => {
+    const { queue } = queued({ 2: T1 })
+    const picked = await selectNext(queue, checkOf().check, NOW)
+    expect(picked.queue).toEqual(queue)
   })
 })
 
@@ -326,6 +551,32 @@ describe('loadQueue / saveQueue', () => {
     expect(loaded.isWritable).toBe(true)
     expect(loaded.notice).toContain('queue.corrupt-2026-10-10T08-30-00-000Z.json')
     expect(loaded.notice!.includes('\n')).toBe(false)
+  })
+
+  test('a skipped mark survives a save and a load', async () => {
+    const { io } = memoryFs()
+    const one = entry()
+    const skipped = markSkipped(enqueue(emptyQueue(), one, opts), { repo: one.repo, hash: one.hash }, NOW)
+    const saved = await saveQueue(io, DATA, skipped)
+    const loaded = await loadQueue(io, DATA, NOW)
+    expect(loaded.queue).toEqual(saved.queue)
+    expect(loaded.queue.pending[0]!.skippedAt).toBe(NOW)
+  })
+
+  test('a queue file from before the skipped mark loads as it is', async () => {
+    const saved = withSeq(4, [entry(), entry()])
+    const { io } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    const loaded = await loadQueue(io, DATA, NOW)
+    expect(loaded.queue).toEqual(saved)
+    expect(loaded.notice).toBeUndefined()
+  })
+
+  test('a skipped mark that is not a string counts as corrupt', async () => {
+    const saved = withSeq(4, [{ ...entry(), skippedAt: 5 } as unknown as QueueEntry])
+    const { io, store } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    const loaded = await loadQueue(io, DATA, NOW)
+    expect(loaded.queue).toEqual(emptyQueue())
+    expect(store.has(`${DATA}/queue.corrupt-2026-10-10T08-30-00-000Z.json`)).toBe(true)
   })
 
   test('valid JSON with the wrong shape counts as corrupt', async () => {

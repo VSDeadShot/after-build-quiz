@@ -27,18 +27,24 @@ Claude Code update.
    *.rst, docs/**, LICENSE*, CHANGELOG*), lockfiles, or binaries; commits with < `minChangedLines` (10)
    added+deleted code lines, whitespace ignored.
 3. **Cap.** At most `queueCap` (10) pending, globally. Overflow evicts the oldest (by committer date) into
-   `expired` (reason `cap`); the commit of the active or paused quiz is never evicted. Pending commits that
-   no longer exist are expired (reason `missing`) when reached. Expiry reasons: `cap`, `missing`,
-   `ungrounded` (see 5).
+   `expired` (reason `cap`); the commit of the active or paused quiz, in whichever session, is never
+   evicted: the next-oldest goes instead, so the cap still holds (with `queueCap` 1 and a quiz in progress,
+   a new commit is the one that expires). Skipped commits (see 4) are evicted like any other. An amend of
+   the quiz's commit replaces its pending entry as usual: the quiz finishes on the commit it asked about,
+   and the amended commit stays pending as a new one. Pending commits that no longer exist are expired
+   (reason `missing`) when reached. Expiry reasons: `cap`, `missing`, `ungrounded` (see 5).
 4. **Commands.**
    - `/quiz` — resume the active or paused quiz (re-show the current question, and the held draft if there
      is one); with an unsent answer (see 6), send it to the grader again, without the cut-off check.
-     Otherwise start a quiz on the newest pending commit.
+     Otherwise start a quiz on the newest pending commit that has not been skipped; when every pending
+     commit has been skipped, on the one skipped longest ago (skipped at the same moment: the newest commit).
    - `/quiz <answer>` — grade a free-text answer to the current question, after the cut-off check below.
      With a held draft, the text is added to it on a new line and the whole answer is graded; with an
      unsent answer, the text replaces it. With no active quiz, starts one and does not grade the text.
    - `/quiz send` — grade the held draft as it is (with no draft held, a notice says so).
-   - `/quiz skip` — end the quiz; the commit stays pending; graded answers stay logged.
+   - `/quiz skip` — end the quiz; the commit stays pending (and still counts as pending), marked as skipped,
+     so it ranks behind every commit that has not been skipped; graded answers stay logged. An amend that
+     replaces a skipped commit queues the new commit unskipped.
    - `/quiz stats` — see 10.
    - `/quiz calibrate` — with `devMode` on only: the grader calibration (see Acceptance tests).
    `skip`, `send`, `stats` and (with `devMode` on) `calibrate` are subcommands only when they are the
@@ -129,6 +135,11 @@ never overwritten. `expired` keeps the last 50 entries (`expiredCount` and per-r
 quiz back. A corrupt or incomplete `active.json` with no good copy is copied aside to
 `active.corrupt-<timestamp>.json`, the quiz in progress is dropped (its commit stays pending) and a
 one-line notice says so; an unreadable one is never used or overwritten. No notice quotes the file.
+Unlike `queue.json`, an unreadable `active.json` is not replaced by its `.tmp` copy even when that copy is
+valid: using it would let the next save overwrite a file the plugin could not read, and a quiz that is not
+offered for one session costs nothing (its commit stays pending and both files stay as they are).
+A pending entry records when it was last skipped (`skippedAt`); queue files written before that load as
+they are.
 `lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached). `seenAt` maps each repo root to its
 last activity (a commit seen, first sight, or being the session repo) and ranks repos for the sweep.
 
