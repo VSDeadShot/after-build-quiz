@@ -2,7 +2,7 @@
 
 A Claude Code plugin that quizzes the author on their own commits so they learn from what gets built.
 
-Built against Claude Code 2.1.316 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
+Built against Claude Code 2.1.325 (function-hooks plugin API, early access). Re-run `claude plugin validate`,
 `tsc -p .`, `claude plugin test .`, the grader calibration and the live answer-isolation check after every
 Claude Code update.
 
@@ -15,7 +15,8 @@ Claude Code update.
    First sight of a repo or branch, and a pruned `lastSeen`, record HEAD as a baseline and queue nothing;
    no backfill. An amend made outside Claude Code replaces the pending commit it amended. Missing folders
    and folders that are no longer repos are skipped. `/quiz` runs the same sweep before picking (step 3). A status-line note "N quizzes pending" ("1 quiz pending")
-   may show; it reads only the queue file and is cleared when nothing is pending.
+   may show; it reads only the queue file and `active.json`, and is cleared when nothing is pending and no
+   quiz is paused (see 7).
    A commit counts when HEAD moved from the last commit seen on that repo and branch (detached HEAD is its
    own key, `HEAD`); every commit by the user (`user.email`, exact match: `-F --author=<email>`) in
    `lastSeen..HEAD` is considered. The first time a repo or branch is seen, only commits made during the
@@ -75,13 +76,22 @@ Claude Code update.
    shown to the model) so a bare `/quiz` sends it again; it is cleared once graded. After the
    grade, that question's key points are revealed — never before an attempt. Completing all 3 removes the
    commit from pending.
-7. **Pause.** While a quiz is active, any prompt the person sends other than `/quiz …` (typed, Remote
-   Control or SDK; not plugin, peer or notification prompts) pauses it, and so does session end. Pausing
-   never blocks or alters the prompt — it is recorded after the prompt passes. A paused quiz keeps
-   `active.json` and its commit stays pending; the status line shows "quiz paused". `/quiz` or
-   `/quiz <answer>` resumes it (an answer while paused is graded against the current question). A paused
-   quiz takes precedence over newer pending commits. An active quiz left by another session loads as
-   paused (`active.json` records the session id).
+7. **Pause.** While a quiz is active in this session, any prompt the person sends other than `/quiz …`
+   pauses it, and so does session end. The person's prompts are those typed at the terminal, sent through
+   Remote Control, the SDK host's own turn (`claude -p`), and the owner's own Slack ping; plugin, peer,
+   channel, scheduled, notification, auto-continuation and unclassified prompts do not pause, nor does a
+   prompt the person does not see as typed, nor one that was refused. Built-in commands that start no model
+   turn (`/help`, `/status`, `/cost`, `/compact`) do not pause; a command that starts one (a skill) does.
+   There is no tool guard: a tool call never pauses a quiz. Pausing never blocks or alters the prompt — it
+   is recorded after the prompt has entered. It only sets a flag: a held draft or an unsent answer stays as
+   it is. A paused quiz keeps `active.json` and its commit stays pending; it does not expire with time. The
+   status line shows "quiz paused · /quiz to resume", followed by " · N pending" when more than one commit
+   is pending. `/quiz`, `/quiz <answer>` or `/quiz send` resumes it (an answer while paused is graded
+   against the current question); `/quiz skip` ends it without resuming; `/quiz stats` leaves it paused.
+   A grade that lands after the quiz was paused is still shown with its key points; the next question
+   waits for `/quiz`. A paused quiz takes precedence over newer pending commits. An active quiz left by
+   another session loads as paused (`active.json` records the session id) and is not written until it is
+   resumed.
 8. **Main-model isolation.** The main model never sees answers, questions, grades, gaps or key points. The
    quiz runs without a model turn; quiz content, including an echo of the user's answer, reaches the user
    only as transcript notices the model never reads. `/quiz` masks its own arguments at `command.run`
@@ -114,6 +124,11 @@ Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then
 increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
 `queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so; an unreadable one is
 never overwritten. `expired` keeps the last 50 entries (`expiredCount` and per-reason counts keep counting).
+`active.json` is written the same way (`active.json.tmp` first, a `seq`, the valid copy with the higher
+`seq` wins). "No quiz" is saved as a state of its own, so an older copy never brings a finished or skipped
+quiz back. A corrupt or incomplete `active.json` with no good copy is copied aside to
+`active.corrupt-<timestamp>.json`, the quiz in progress is dropped (its commit stays pending) and a
+one-line notice says so; an unreadable one is never used or overwritten. No notice quotes the file.
 `lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached). `seenAt` maps each repo root to its
 last activity (a commit seen, first sight, or being the session repo) and ranks repos for the sweep.
 
@@ -176,6 +191,10 @@ unquoted YAML-style `name: value` line with a run-together name such as `apikey:
 for it would also flag type annotations such as `apikey: ApiKeyConfig`).
 Assignment-style secrets inside a sentence, e.g. `pasted API_TOKEN=tok_live_… here`, are not redacted yet,
 in the context pack or the log: the assignment rule only matches a line that starts with the name.
+`!` shell commands start a model turn without a prompt event, so they do not pause an active quiz (the
+status line keeps showing the pending count). Whether user-invoked skills raise a prompt event is unverified
+on Claude Code 2.1.325; if they do not, they do not pause either. A session that dies without its session
+end and is resumed under the same id shows its quiz as active until the next prompt pauses it.
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

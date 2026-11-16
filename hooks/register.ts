@@ -1,10 +1,13 @@
 import type { EngineInterface, Register } from 'claude-code'
 
+import { peekActive, updateActive } from './active.ts'
 import { detectCommits, parseCommit } from './detect.ts'
 import type { DetectInput } from './detect.ts'
 import { checkDataDir, resolveDataDir, safeDataDirOf } from './paths.ts'
 import type { DataDirVerdict, SafeDataDir } from './paths.ts'
-import { loadQueue, statusText } from './queue.ts'
+import { isPausingPrompt, pauseIfLive, statusLine, viewOf } from './pause.ts'
+import type { QuizView } from './pause.ts'
+import { loadQueue } from './queue.ts'
 import type { QueueIO } from './queue.ts'
 import { readSettings } from './settings.ts'
 import type { Settings } from './settings.ts'
@@ -23,6 +26,9 @@ type State = {
   detections: Promise<void> // one at a time: no in-process races on the queue file
   dataDirVerdict: DataDirVerdict | undefined
   shownOnce: Set<string>
+  // How this session sees the quiz in active.json: read at session start, then kept in step by the
+  // pause below (and by /quiz). Only 'live' makes a prompt or a session end touch the file.
+  quiz: QuizView
 }
 
 const oneLine = (error: unknown): string => String(error).replace(/\s+/g, ' ').trim()
@@ -95,7 +101,7 @@ async function detectAfter($: EngineInterface, state: State, input: Omit<DetectI
       queueCap: state.settings.queueCap,
     }, { ...input, now: await isoNow($) })
     if (outcome.notice !== undefined) noticeOnce($, state, 'queue', outcome.notice)
-    if (outcome.queue !== undefined) $.ui.status(statusText(outcome.queue))
+    if (outcome.queue !== undefined) $.ui.status(statusLine(outcome.queue, state.quiz))
   } catch (error) {
     debug($, `commit detection failed: ${oneLine(error)}`)
   }
@@ -117,9 +123,31 @@ async function sweepAfter($: EngineInterface, state: State, sessionCwd: string) 
     }, { sessionCwd, now: await isoNow($) })
     for (const error of outcome.errors) debug($, `sweep: ${error}`)
     if (outcome.notice !== undefined) noticeOnce($, state, 'queue', outcome.notice)
-    if (outcome.queue !== undefined) $.ui.status(statusText(outcome.queue))
+    if (outcome.queue !== undefined) $.ui.status(statusLine(outcome.queue, state.quiz))
   } catch (error) {
     debug($, `sweep failed: ${oneLine(error)}`)
+  }
+}
+
+// Pauses this session's running quiz (SPEC 7): the flag in active.json, then the status line.
+// Called only after the prompt entered or the session's end step ran; it never throws.
+// `endingSession` is set at session end, where the status line no longer matters.
+async function pauseQuiz($: EngineInterface, state: State, endingSession?: string) {
+  try {
+    const dataDir = await safeDataDir($, state)
+    if (dataDir === undefined) return
+
+    const now = await isoNow($)
+    const sessionId = endingSession ?? await $.session.id()
+    const updated = await updateActive(ioOf($), dataDir, now, pauseIfLive(sessionId, now))
+    if (updated.notice !== undefined) noticeOnce($, state, 'active', updated.notice)
+    state.quiz = viewOf(updated.quiz, sessionId)
+    if (endingSession !== undefined) return
+
+    const loaded = await loadQueue(ioOf($), dataDir, now, { isReadOnly: true })
+    $.ui.status(statusLine(loaded.queue, state.quiz))
+  } catch (error) {
+    debug($, `quiz not paused: ${oneLine(error)}`)
   }
 }
 
@@ -139,12 +167,26 @@ async function watch<R>($: EngineInterface, state: State, command: string, isBac
   return ran
 }
 
-// The status line reads the queue file only: no git, no model, no writes.
+// How this session sees the quiz in active.json. Reading only; a failure reads as no quiz.
+async function readQuizView($: EngineInterface, state: State, dataDir: string): Promise<QuizView> {
+  try {
+    const peeked = await peekActive(ioOf($), dataDir)
+    if (peeked.notice !== undefined) noticeOnce($, state, 'active-read', peeked.notice)
+    return viewOf(peeked.quiz, await $.session.id())
+  } catch (error) {
+    debug($, `active quiz not read: ${oneLine(error)}`)
+    return 'none'
+  }
+}
+
+// The status line reads the queue file and active.json only: no git, no model, no writes.
 async function showStatus($: EngineInterface, state: State) {
   try {
-    const loaded = await loadQueue(ioOf($), await dataDirOf($, state), await isoNow($), { isReadOnly: true })
+    const dataDir = await dataDirOf($, state)
+    const loaded = await loadQueue(ioOf($), dataDir, await isoNow($), { isReadOnly: true })
     if (loaded.notice !== undefined) noticeOnce($, state, 'queue', loaded.notice)
-    $.ui.status(statusText(loaded.queue))
+    state.quiz = await readQuizView($, state, dataDir)
+    $.ui.status(statusLine(loaded.queue, state.quiz))
   } catch (error) {
     debug($, `status line not set: ${oneLine(error)}`)
   }
@@ -157,6 +199,7 @@ export const register: Register = (on, options) => {
     detections: Promise.resolve(),
     dataDirVerdict: undefined,
     shownOnce: new Set(),
+    quiz: 'none',
   }
 
   on('tool.call', { tool: 'Bash' }, ($, e, next) =>
@@ -182,5 +225,37 @@ export const register: Register = (on, options) => {
       state.detections = state.detections.then(() => sweepAfter($, state, sessionCwd)).catch(() => {})
     })
     return started
+  }).catch(($, e, next) => next(e))
+
+  // SPEC 7: a prompt from the person, other than /quiz, pauses the running quiz. The prompt goes
+  // down first and comes back exactly as the engine answered it; the pause is recorded afterwards,
+  // on a timer. With no running quiz in this session, this costs one comparison and no I/O.
+  on('prompt.submit', async ($, e, next) => {
+    const entered = await next(e)
+    try {
+      if (state.quiz === 'live' && entered.drop === undefined && isPausingPrompt(e)) {
+        $.clock.after(0, () => {
+          state.detections = state.detections.then(() => pauseQuiz($, state)).catch(() => {})
+        })
+      }
+    } catch {
+      // the prompt has entered: nothing here may change that
+    }
+    return entered
+  }).catch(($, e, next) => next(e))
+
+  // Session end pauses it too, after the engine's own end step and inside its short budget. If the
+  // write does not make it, the quiz still loads as paused in every other session (its session id).
+  on('session.end', async ($, e, next) => {
+    const ended = await next(e)
+    try {
+      if (state.quiz === 'live') {
+        state.detections = state.detections.then(() => pauseQuiz($, state, e.sessionId)).catch(() => {})
+        await state.detections
+      }
+    } catch {
+      // the session has ended: nothing here may change that
+    }
+    return ended
   }).catch(($, e, next) => next(e))
 }
