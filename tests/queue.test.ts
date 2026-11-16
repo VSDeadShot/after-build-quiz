@@ -596,6 +596,44 @@ describe('loadQueue / saveQueue', () => {
     expect(writes).toEqual([])
   })
 
+  const UNREADABLE = 'after-build-quiz: could not read queue.json (Error: EIO: too large); using an empty queue and not overwriting it this session'
+
+  test('an unreadable queue.json is not replaced by a valid .tmp copy: empty queue, not writable, the notice', async () => {
+    const text = JSON.stringify(withSeq(6, [entry(), entry()]))
+    const { io, makeUnreadable, writes, store } = memoryFs({ [TMP]: text })
+    makeUnreadable(MAIN)
+
+    const loaded = await loadQueue(io, DATA, NOW)
+
+    expect(loaded).toEqual({ queue: emptyQueue(), isWritable: false, notice: UNREADABLE })
+    expect(writes).toEqual([])
+    expect(store.get(TMP)).toBe(text)
+  })
+
+  test('the same on a read-only load (the status line): the .tmp copy is not shown either', async () => {
+    const { io, makeUnreadable, writes } = memoryFs({ [TMP]: JSON.stringify(withSeq(6, [entry(), entry()])) })
+    makeUnreadable(MAIN)
+
+    const loaded = await loadQueue(io, DATA, NOW, { isReadOnly: true })
+
+    expect(loaded).toEqual({ queue: emptyQueue(), isWritable: false, notice: UNREADABLE })
+    expect(writes).toEqual([])
+  })
+
+  test('an unreadable .tmp beside a good queue.json: queue.json is used, writable, no notice', async () => {
+    const saved = withSeq(6, [entry(), entry()])
+    const { io, makeUnreadable } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    makeUnreadable(TMP)
+    expect(await loadQueue(io, DATA, NOW)).toEqual({ queue: saved, isWritable: true })
+  })
+
+  test('a corrupt .tmp beside a good queue.json: queue.json is used, nothing is copied aside', async () => {
+    const saved = withSeq(6, [entry()])
+    const { io, writes } = memoryFs({ [MAIN]: JSON.stringify(saved), [TMP]: '{ broken' })
+    expect(await loadQueue(io, DATA, NOW)).toEqual({ queue: saved, isWritable: true })
+    expect(writes).toEqual([])
+  })
+
   test('a failing write: saveQueue reports false and does not throw', async () => {
     const { io, breakWrites } = memoryFs()
     breakWrites()

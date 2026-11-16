@@ -80,6 +80,25 @@ describe('detectCommits: never throws, never writes outside dataDir', () => {
     expect(fs.writes).toEqual([])
   })
 
+  test('an unreadable queue with a valid .tmp copy: nothing queued, nothing written, notice returned', async () => {
+    const repo = makeRepo(TOP)
+    const base = commit(repo, { committedAt: OLD })
+    const fs = memoryFs()
+    await saveQueue(fs.io, DATA, { ...emptyQueue(), lastSeen: { [MAIN_KEY]: base.hash } })
+    commit(repo)
+    fs.makeUnreadable(`${DATA}/queue.json`)
+    const seeded = fs.writes.length
+    const tmp = fs.store.get(`${DATA}/queue.json.tmp`)
+
+    const outcome = await detectCommits(deps(fakeGit(repo).run, fs.io), input('git commit -m x'))
+
+    expect(outcome.queued).toBe(0)
+    expect(outcome.queue).toBeUndefined()
+    expect(outcome.notice).toContain('could not read queue.json')
+    expect(fs.writes.length).toBe(seeded)
+    expect(fs.store.get(`${DATA}/queue.json.tmp`)).toBe(tmp)
+  })
+
   test('a corrupt queue: copied aside, notice, detection carries on', async () => {
     const repo = makeRepo(TOP)
     commit(repo)

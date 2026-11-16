@@ -231,18 +231,20 @@ export const loadQueue = async (
   const mainState = await readState(io, main)
   const tmpState = await readState(io, tmp)
 
-  const valid = [mainState, tmpState].flatMap(file => (file.state === 'valid' ? [file.queue] : []))
-  if (valid.length > 0) {
-    const newest = valid.reduce((best, queue) => (queue.seq > best.seq ? queue : best))
-    return { queue: newest, isWritable: true }
-  }
-
+  // A queue.json that cannot be read is never used or overwritten, whatever the `.tmp` copy holds:
+  // loading the copy as writable would let the next save overwrite a file we could not read.
   if (mainState.state === 'unreadable') {
     return {
       queue: emptyQueue(),
       isWritable: false,
       notice: `after-build-quiz: could not read queue.json (${mainState.reason}); using an empty queue and not overwriting it this session`,
     }
+  }
+
+  const valid = [mainState, tmpState].flatMap(file => (file.state === 'valid' ? [file.queue] : []))
+  if (valid.length > 0) {
+    const newest = valid.reduce((best, queue) => (queue.seq > best.seq ? queue : best))
+    return { queue: newest, isWritable: true }
   }
 
   if (mainState.state === 'invalid' && options.isReadOnly === true) {

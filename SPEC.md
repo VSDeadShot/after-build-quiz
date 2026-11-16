@@ -128,16 +128,20 @@ The plugin refuses to write if `dataDir` is inside a git work tree. Paths are st
 Concurrent sessions may race on a write; accepted for v1.
 Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then to `queue.json`; each save
 increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
-`queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so; an unreadable one is
-never overwritten. `expired` keeps the last 50 entries (`expiredCount` and per-reason counts keep counting).
+`queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so. `expired` keeps the
+last 50 entries (`expiredCount` and per-reason counts keep counting).
 `active.json` is written the same way (`active.json.tmp` first, a `seq`, the valid copy with the higher
 `seq` wins). "No quiz" is saved as a state of its own, so an older copy never brings a finished or skipped
 quiz back. A corrupt or incomplete `active.json` with no good copy is copied aside to
 `active.corrupt-<timestamp>.json`, the quiz in progress is dropped (its commit stays pending) and a
-one-line notice says so; an unreadable one is never used or overwritten. No notice quotes the file.
-Unlike `queue.json`, an unreadable `active.json` is not replaced by its `.tmp` copy even when that copy is
-valid: using it would let the next save overwrite a file the plugin could not read, and a quiz that is not
-offered for one session costs nothing (its commit stays pending and both files stay as they are).
+one-line notice says so. No notice quotes the file.
+A `queue.json` or `active.json` that cannot be read is never used and never overwritten, even when its
+`.tmp` copy is valid: using the copy would let the next save overwrite a file the plugin could not read.
+For that session the queue reads as empty and nothing is queued, or no quiz is offered; a one-line notice
+says so, and both files stay as they are. Commits made meanwhile are picked up once the file can be read
+again, for repos and branches the plugin has already seen; a first commit on a new repo or branch during
+that window may be missed. The rule is about the file itself: an unreadable `.tmp` beside a good file is
+ignored.
 A pending entry records when it was last skipped (`skippedAt`); queue files written before that load as
 they are.
 `lastSeen` is keyed `<repo root>::<branch>` (`::HEAD` when detached). `seenAt` maps each repo root to its
@@ -206,6 +210,9 @@ in the context pack or the log: the assignment rule only matches a line that sta
 status line keeps showing the pending count). Whether user-invoked skills raise a prompt event is unverified
 on Claude Code 2.1.325; if they do not, they do not pause either. A session that dies without its session
 end and is resumed under the same id shows its quiz as active until the next prompt pauses it.
+While `queue.json` cannot be read, nothing is queued. Commits made meanwhile are picked up once the file can
+be read again, for repos and branches the plugin has already seen; a first commit on a new repo or branch
+during that window may be missed.
 Shift+Enter sends the prompt instead of adding a line. The cut-off check (4) holds a single-line answer
 that looks cut off; one cut at a point that looks finished (a CONCEPT phrase, or a WHY or EXPLAIN line
 ending in a full stop) is graded as sent, with no undo. Multi-line answers use Ctrl+J.

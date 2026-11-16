@@ -219,5 +219,9 @@ export const memoryFs = (files: Record<string, string> = {}) => {
     },
     exists: async path => store.has(path) || unreadable.has(path),
   }
-  return { io, store, writes, makeUnreadable: (path: string) => unreadable.add(path) }
+  return {
+    io, store, writes,
+    makeUnreadable: (path: string) => unreadable.add(path),
+    makeReadable: (path: string) => unreadable.delete(path),
+  }
 }
