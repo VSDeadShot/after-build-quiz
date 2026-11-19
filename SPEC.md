@@ -129,7 +129,8 @@ Concurrent sessions may race on a write; accepted for v1.
 Queue writes are crash-safe: the full queue is written to `queue.json.tmp`, then to `queue.json`; each save
 increments `seq`, and a load takes the valid copy with the higher `seq`. A corrupt queue is copied aside to
 `queue.corrupt-<timestamp>.json`, a fresh queue starts, and a one-line notice says so. `expired` keeps the
-last 50 entries (`expiredCount` and per-reason counts keep counting).
+last 50 entries (`expiredCount` and per-reason counts keep counting). Queue files written before per-reason
+counts start them from the entries they kept.
 `active.json` is written the same way (`active.json.tmp` first, a `seq`, the valid copy with the higher
 `seq` wins). "No quiz" is saved as a state of its own, so an older copy never brings a finished or skipped
 quiz back. A corrupt or incomplete `active.json` with no good copy is copied aside to

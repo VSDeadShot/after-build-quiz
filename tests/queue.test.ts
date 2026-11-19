@@ -5,7 +5,8 @@ import type { Run } from '../hooks/git.ts'
 import { safeDataDirOf } from '../hooks/paths.ts'
 import type { Exists } from '../hooks/paths.ts'
 import {
-  COMMIT_FORMAT, emptyQueue, enqueue, loadQueue, markSkipped, parseCommitLine, peekQueue, saveQueue, selectNext,
+  COMMIT_FORMAT, completeCommit, emptyQueue, enqueue, expireUngrounded, loadQueue, markSkipped, parseCommitLine, peekQueue,
+  saveQueue, selectNext, updateQueue,
 } from '../hooks/queue.ts'
 import type { Queue, QueueEntry, QueueIO } from '../hooks/queue.ts'
 import type { SweepDeps } from '../hooks/sweep.ts'
@@ -380,6 +381,13 @@ describe('selectNext', () => {
     expect(picked.queue.expiredCount).toBe(1)
   })
 
+  test('a missing commit counts under missing (3f2)', async () => {
+    const { newer, queue } = twoQueued()
+    const { check } = recordingCheck(new Set([newer.hash]))
+    const picked = await selectNext(queue, check, NOW)
+    expect(picked.queue.expiredByReason).toEqual({ cap: 0, missing: 1, ungrounded: 0 })
+  })
+
   test('a repo folder that is gone expires its entries without running git', async () => {
     const { older, newer, queue } = twoQueued()
     const { check, calls } = recordingCheck(new Set(), new Set([newer.repo]))
@@ -716,8 +724,165 @@ describe('loadQueue / saveQueue', () => {
         // @ts-expect-error a plain string is not a SafeDataDir
         dataDir: 'C:/data',
       }
+      // @ts-expect-error a plain string is not a SafeDataDir
+      void updateQueue(io, 'C:/data', NOW, queue => queue)
       return [detect, sweep]
     }
     expect(typeof unchecked).toBe('function')
+  })
+})
+
+describe('completeCommit: a finished quiz leaves pending (3f2)', () => {
+  const two = () => {
+    const a = entry({ committedAt: at(1) })
+    const b = entry({ committedAt: at(2) })
+    return { a, b, queue: enqueue(enqueue(emptyQueue(), a, opts), b, opts) }
+  }
+
+  test('removes only that commit; expired and every count stay as they are', () => {
+    const { a, b, queue } = two()
+    const done = completeCommit(queue, { repo: a.repo, hash: a.hash })
+    expect(done.pending).toEqual([b])
+    expect([done.expired, done.expiredCount, done.expiredByReason]).toEqual([[], 0, { cap: 0, missing: 0, ungrounded: 0 }])
+  })
+
+  test('another commit keeps its skipped mark', () => {
+    const { a, b, queue } = two()
+    const skipped = markSkipped(queue, { repo: b.repo, hash: b.hash }, NOW)
+    expect(completeCommit(skipped, { repo: a.repo, hash: a.hash }).pending).toEqual([{ ...b, skippedAt: NOW }])
+  })
+
+  test('a commit that is not pending (amended away, already gone, another repo) gives back the same queue', () => {
+    const { a, queue } = two()
+    expect(completeCommit(queue, { repo: a.repo, hash: 'f'.repeat(40) })).toBe(queue)
+    expect(completeCommit(queue, { repo: 'C:/work/bar', hash: a.hash })).toBe(queue)
+  })
+})
+
+describe('expireUngrounded (3f2)', () => {
+  test('moves the commit to expired with reason ungrounded and its detail; the total and ungrounded count go up', () => {
+    const a = entry({ committedAt: at(1) })
+    const b = entry({ committedAt: at(2) })
+    const queue = enqueue(enqueue(emptyQueue(), a, opts), b, opts)
+    const out = expireUngrounded(queue, { repo: a.repo, hash: a.hash }, NOW, 'no question cited a diff line')
+    expect(out.pending).toEqual([b])
+    expect(out.expired).toEqual([{
+      repo: a.repo, repoName: a.repoName, hash: a.hash, subject: a.subject,
+      reason: 'ungrounded', detail: 'no question cited a diff line', expiredAt: NOW,
+    }])
+    expect([out.expiredCount, out.expiredByReason]).toEqual([1, { cap: 0, missing: 0, ungrounded: 1 }])
+  })
+
+  test('a commit that is not pending gives back the same queue', () => {
+    const queue = enqueue(emptyQueue(), entry(), opts)
+    expect(expireUngrounded(queue, { repo: 'C:/work/foo', hash: 'f'.repeat(40) }, NOW)).toBe(queue)
+  })
+
+  test('past the last 50 kept, the total and the per-reason count keep counting', () => {
+    const entries = Array.from({ length: 55 }, () => entry())
+    let queue: Queue = withSeq(0, entries)
+    for (const one of entries) queue = expireUngrounded(queue, { repo: one.repo, hash: one.hash }, NOW)
+    expect([queue.pending.length, queue.expired.length, queue.expiredCount, queue.expiredByReason])
+      .toEqual([0, 50, 55, { cap: 0, missing: 0, ungrounded: 55 }])
+  })
+})
+
+describe('expired counts per reason (3f2)', () => {
+  const ASIDE = `${DATA}/queue.corrupt-2026-10-10T08-30-00-000Z.json`
+  const expiredRow = (reason: string) => ({
+    repo: 'C:/work/foo', repoName: 'foo', hash: 'e'.repeat(40), subject: 'gone', reason, expiredAt: NOW,
+  })
+
+  test('a cap eviction counts under cap', () => {
+    const queue = Array.from({ length: 12 }, () => entry()).reduce((sum, one) => enqueue(sum, one, opts), emptyQueue())
+    expect([queue.expiredCount, queue.expiredByReason]).toEqual([2, { cap: 2, missing: 0, ungrounded: 0 }])
+  })
+
+  test('a queue file from before per-reason counts loads with counts from its kept entries: valid, writable, nothing copied aside', async () => {
+    const saved = withSeq(4, [entry()])
+    const kept = [expiredRow('cap'), expiredRow('cap'), expiredRow('missing')]
+    const old: Partial<Queue> = { ...saved, expired: kept as Queue['expired'], expiredCount: 60 }
+    delete old.expiredByReason
+    const { io, store, writes } = memoryFs({ [MAIN]: JSON.stringify(old) })
+    expect('expiredByReason' in JSON.parse(store.get(MAIN)!)).toBe(false)
+
+    const expected = { ...old, expiredByReason: { cap: 2, missing: 1, ungrounded: 0 } }
+    expect(await loadQueue(io, DATA, NOW)).toEqual({ queue: expected, isWritable: true })
+    expect(await peekQueue(io, DATA)).toEqual({ queue: expected, isWritable: true })
+    expect(writes).toEqual([])
+  })
+
+  test('per-reason counts that are not a whole number of at least 0 for every reason count as corrupt', async () => {
+    const bad: [string, unknown][] = [
+      ['a reason left out', { cap: 0, missing: 0 }],
+      ['a negative count', { cap: -1, missing: 0, ungrounded: 0 }],
+      ['a fraction', { cap: 0, missing: 0.5, ungrounded: 0 }],
+      ['not an object', 3],
+    ]
+    for (const [name, counts] of bad) {
+      const { io, store } = memoryFs({ [MAIN]: JSON.stringify({ ...withSeq(4, [entry()]), expiredByReason: counts }) })
+      const loaded = await loadQueue(io, DATA, NOW)
+      expect([name, loaded.queue, store.has(ASIDE)]).toEqual([name, emptyQueue(), true])
+    }
+  })
+})
+
+describe('updateQueue: load, change, save (3f2)', () => {
+  test('a change is saved with the next seq, and the saved queue comes back', async () => {
+    const one = entry()
+    const { io, writes } = memoryFs({ [MAIN]: JSON.stringify(withSeq(4, [one])) })
+    const updated = await updateQueue(io, DATA, NOW, queue => completeCommit(queue, { repo: one.repo, hash: one.hash }))
+    expect([updated.isChanged, updated.isSaved, updated.queue.seq, updated.queue.pending]).toEqual([true, true, 5, []])
+    expect(writes).toEqual([TMP, MAIN])
+    expect((await loadQueue(io, DATA, NOW)).queue).toEqual(updated.queue)
+  })
+
+  test('a change that gives back the same queue writes nothing', async () => {
+    const saved = withSeq(4, [entry()])
+    const { io, writes } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    expect(await updateQueue(io, DATA, NOW, queue => queue)).toEqual({ queue: saved, isChanged: false, isSaved: false })
+    expect(writes).toEqual([])
+  })
+
+  test('an unreadable queue.json is not written, even with a valid .tmp copy; the notice comes back', async () => {
+    const { io, makeUnreadable, writes } = memoryFs({ [TMP]: JSON.stringify(withSeq(6, [entry()])) })
+    makeUnreadable(MAIN)
+    const updated = await updateQueue(io, DATA, NOW, queue => ({ ...queue, lastSeen: { 'C:/work/foo::main': 'a'.repeat(40) } }))
+    expect([updated.queue, updated.isChanged, updated.isSaved, writes]).toEqual([emptyQueue(), false, false, []])
+    expect(updated.notice).toContain('could not read queue.json')
+  })
+
+  test('a change that throws: nothing written, nothing thrown, the queue as it is on disk', async () => {
+    const saved = withSeq(4, [entry()])
+    const { io, writes } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    const updated = await updateQueue(io, DATA, NOW, () => { throw new Error('boom') })
+    expect([updated, writes]).toEqual([{ queue: saved, isChanged: false, isSaved: false }, []])
+  })
+
+  test('a failed save reports the queue as it is on disk', async () => {
+    const one = entry()
+    const saved = withSeq(4, [one])
+    const { io, breakWrites } = memoryFs({ [MAIN]: JSON.stringify(saved) })
+    breakWrites()
+    const updated = await updateQueue(io, DATA, NOW, queue => completeCommit(queue, { repo: one.repo, hash: one.hash }))
+    expect(updated).toEqual({ queue: saved, isChanged: true, isSaved: false })
+  })
+
+  test('a corrupt queue.json is copied aside first; the change applies to a fresh queue, with the notice', async () => {
+    const { io, store } = memoryFs({ [MAIN]: '{ broken' })
+    const updated = await updateQueue(io, DATA, NOW, queue => ({ ...queue, lastSeen: { 'C:/work/foo::main': 'a'.repeat(40) } }))
+    expect([updated.isChanged, updated.isSaved, updated.queue.seq]).toEqual([true, true, 1])
+    expect(store.get(`${DATA}/queue.corrupt-2026-10-10T08-30-00-000Z.json`)).toBe('{ broken')
+    expect(updated.notice).toContain('was corrupt')
+  })
+
+  test('a file system that fails every call never throws', async () => {
+    const broken: QueueIO = {
+      read: async () => { throw new Error('EIO') },
+      write: async () => { throw new Error('EIO') },
+      exists: async () => { throw new Error('EIO') },
+    }
+    const updated = await updateQueue(broken, DATA, NOW, queue => ({ ...queue, seq: queue.seq }))
+    expect([updated.isChanged, updated.isSaved]).toEqual([false, false])
   })
 })

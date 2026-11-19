@@ -27,12 +27,17 @@ export type QueueEntry = {
 // A commit by where it lives: the same hash in another repo is another commit.
 export type CommitRef = { repo: string; hash: string }
 
+// Why a commit left the queue without a quiz (SPEC 3): over the cap, gone from its repo, or two
+// generations that could not be grounded in the diff.
+export type ExpiryReason = 'cap' | 'missing' | 'ungrounded'
+export type ExpiredCounts = Record<ExpiryReason, number>
+
 export type ExpiredEntry = {
   repo: string
   repoName: string
   hash: string
   subject: string
-  reason: 'cap' | 'missing'
+  reason: ExpiryReason
   detail?: string
   expiredAt: string
 }
@@ -43,6 +48,7 @@ export type Queue = {
   pending: QueueEntry[] // sorted oldest → newest by committedAt
   expired: ExpiredEntry[] // the last EXPIRED_KEPT
   expiredCount: number
+  expiredByReason: ExpiredCounts // per reason; like expiredCount, counts on past the last EXPIRED_KEPT
   lastSeen: Record<string, string> // `<repo root>::<branch>` → last commit seen
   seenAt: Record<string, string> // repo root → last activity (ISO); ranks repos for the sweep
 }
@@ -60,7 +66,8 @@ export type ParsedCommit = {
 const EXPIRED_KEPT = 50
 
 export const emptyQueue = (): Queue => ({
-  version: 1, seq: 0, pending: [], expired: [], expiredCount: 0, lastSeen: {}, seenAt: {},
+  version: 1, seq: 0, pending: [], expired: [], expiredCount: 0, expiredByReason: { cap: 0, missing: 0, ungrounded: 0 },
+  lastSeen: {}, seenAt: {},
 })
 
 // `git log -1 --format=<this>`: hash, parents, author date, committer date, subject.
@@ -105,6 +112,7 @@ const expire = (
     pending: queue.pending.filter(pending => pending.hash !== entry.hash),
     expired: [...queue.expired, record].slice(-EXPIRED_KEPT),
     expiredCount: queue.expiredCount + 1,
+    expiredByReason: { ...queue.expiredByReason, [reason]: queue.expiredByReason[reason] + 1 },
   }
 }
 
@@ -139,6 +147,20 @@ export const markSkipped = (queue: Queue, commit: CommitRef, now: string): Queue
   queue.pending.some(entry => isCommit(entry, commit))
     ? { ...queue, pending: queue.pending.map(entry => (isCommit(entry, commit) ? { ...entry, skippedAt: now } : entry)) }
     : queue
+
+// A finished quiz (all 3 answered) takes its commit out of pending (SPEC 6). Not an expiry: no expired entry,
+// no count. A commit that is no longer pending (amended away, already gone) gives back the same queue.
+export const completeCommit = (queue: Queue, commit: CommitRef): Queue =>
+  queue.pending.some(entry => isCommit(entry, commit))
+    ? { ...queue, pending: queue.pending.filter(entry => !isCommit(entry, commit)) }
+    : queue
+
+// Two generations that could not be grounded in the diff expire the commit (reason `ungrounded`, SPEC 5).
+// A commit that is no longer pending gives back the same queue.
+export const expireUngrounded = (queue: Queue, commit: CommitRef, now: string, detail?: string): Queue => {
+  const entry = queue.pending.find(pending => isCommit(pending, commit))
+  return entry === undefined ? queue : expire(queue, entry, 'ungrounded', now, detail)
+}
 
 // The order /quiz tries pending commits in: the ones never skipped, newest first; then the skipped
 // ones, the one skipped longest ago first (skipped at the same moment: the newest commit first).
@@ -182,6 +204,18 @@ const isEntry = (value: unknown): boolean =>
   (typeof value.parent === 'string' || value.parent === null) &&
   (value.skippedAt === undefined || typeof value.skippedAt === 'string')
 
+const REASONS: readonly ExpiryReason[] = ['cap', 'missing', 'ungrounded']
+
+const isCounts = (value: unknown): boolean =>
+  isRecord(value) && REASONS.every(reason => Number.isInteger(value[reason]) && (value[reason] as number) >= 0)
+
+// A queue file from before per-reason counts starts them from the expired entries it kept.
+const countsOf = (expired: readonly { reason?: unknown }[]): ExpiredCounts => {
+  const counts: ExpiredCounts = { cap: 0, missing: 0, ungrounded: 0 }
+  for (const { reason } of expired) if (REASONS.includes(reason as ExpiryReason)) counts[reason as ExpiryReason]++
+  return counts
+}
+
 const isQueue = (value: unknown): value is Queue =>
   isRecord(value) &&
   value.version === 1 &&
@@ -189,6 +223,7 @@ const isQueue = (value: unknown): value is Queue =>
   Array.isArray(value.pending) && value.pending.every(isEntry) &&
   Array.isArray(value.expired) && value.expired.every(isRecord) &&
   Number.isInteger(value.expiredCount) &&
+  (value.expiredByReason === undefined || isCounts(value.expiredByReason)) &&
   isRecord(value.lastSeen) && Object.values(value.lastSeen).every(hash => typeof hash === 'string') &&
   (value.seenAt === undefined ||
     (isRecord(value.seenAt) && Object.values(value.seenAt).every(when => typeof when === 'string')))
@@ -196,8 +231,11 @@ const isQueue = (value: unknown): value is Queue =>
 // Stored by store.ts (crash-safe load/save shared with active.json).
 const QUEUE_FILE: StoreFile<Queue> = {
   name: 'queue',
-  // a file from before seenAt existed loads with an empty one
-  parse: value => (isQueue(value) ? { ...value, seenAt: value.seenAt ?? {} } : undefined),
+  // a file from before seenAt existed loads with an empty one, and one from before per-reason counts with
+  // counts from the expired entries it kept
+  parse: value => (isQueue(value)
+    ? { ...value, seenAt: value.seenAt ?? {}, expiredByReason: value.expiredByReason ?? countsOf(value.expired) }
+    : undefined),
 }
 
 type QueueLoad = { queue: Queue; notice?: string; isWritable: boolean }
@@ -251,6 +289,38 @@ export const peekQueue = async (io: QueueIO, dataDir: string): Promise<QueueLoad
       }
     case 'absent':
       return { queue: emptyQueue(), isWritable: true }
+  }
+}
+
+export type QueueChange = (queue: Queue) => Queue
+export type QueueUpdate = { queue: Queue; isChanged: boolean; isSaved: boolean; notice?: string }
+
+// Load, change, save (for /quiz skip and a finished quiz). Nothing is written when queue.json cannot be
+// written (unreadable, or corrupt and not copied aside), when the change throws, or when it gives back the
+// queue it was handed. `queue` is the queue as it now stands on disk. Never throws.
+// No chain of its own: callers run it on register's one-at-a-time line (state.detections), with commit
+// detection and the sweep, so the session's queue writes never race each other.
+export const updateQueue = async (
+  io: QueueIO, dataDir: SafeDataDir, now: string, change: QueueChange,
+): Promise<QueueUpdate> => {
+  try {
+    const loaded = await loadQueue(io, dataDir, now)
+    const told = (update: QueueUpdate): QueueUpdate => (loaded.notice === undefined ? update : { ...update, notice: loaded.notice })
+    const unchanged = told({ queue: loaded.queue, isChanged: false, isSaved: false })
+    if (!loaded.isWritable) return unchanged
+
+    let after: Queue
+    try {
+      after = change(loaded.queue)
+    } catch {
+      return unchanged
+    }
+    if (after === loaded.queue) return unchanged
+
+    const saved = await saveQueue(io, dataDir, after)
+    return told({ queue: saved.isSaved ? saved.queue : loaded.queue, isChanged: true, isSaved: saved.isSaved })
+  } catch {
+    return { queue: emptyQueue(), isChanged: false, isSaved: false }
   }
 }
 
