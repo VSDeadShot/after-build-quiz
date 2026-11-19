@@ -2,7 +2,7 @@
 
 Read SPEC.md first. SPEC.md is the source of truth; change it (with approval) before changing behaviour.
 
-Built against Claude Code 2.1.327. The function-hooks API is early access: re-run validate + tests (and
+Built against Claude Code 2.1.328. The function-hooks API is early access: re-run validate + tests (and
 calibration, and the live answer-isolation check in SPEC) after every Claude Code update, before any other
 work.
 
