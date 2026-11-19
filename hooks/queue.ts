@@ -254,13 +254,15 @@ export const peekQueue = async (io: QueueIO, dataDir: string): Promise<QueueLoad
   }
 }
 
-// Each save raises seq; the queue is written as it is, unchecked.
+// Each save raises seq. A queue that would not load back is never written (as saveActive): the save is
+// refused and the file on disk stays as it is, instead of being copied aside as corrupt at the next load.
 export const saveQueue = async (
   io: QueueIO,
   dataDir: SafeDataDir,
   queue: Queue,
 ): Promise<{ isSaved: boolean; queue: Queue }> => {
   const next: Queue = { ...queue, seq: queue.seq + 1 }
+  if (!isQueue(next)) return { isSaved: false, queue }
   return (await saveStore(io, dataDir, QUEUE_FILE, next)) ? { isSaved: true, queue: next } : { isSaved: false, queue }
 }
 

@@ -135,6 +135,8 @@ last 50 entries (`expiredCount` and per-reason counts keep counting).
 quiz back. A corrupt or incomplete `active.json` with no good copy is copied aside to
 `active.corrupt-<timestamp>.json`, the quiz in progress is dropped (its commit stays pending) and a
 one-line notice says so. No notice quotes the file.
+A `queue.json` or `active.json` that would not load back is never written: the save is refused and the file
+on disk stays as it was.
 A `queue.json` or `active.json` that cannot be read is never used and never overwritten, even when its
 `.tmp` copy is valid: using the copy would let the next save overwrite a file the plugin could not read.
 For that session the queue reads as empty and nothing is queued, or no quiz is offered; a one-line notice

@@ -657,6 +657,41 @@ describe('loadQueue / saveQueue', () => {
     expect(result.queue.seq).toBe(0)
   })
 
+  // 3f1: as saveActive, a queue that would not load back is never written; the good file on disk stays.
+  test('a queue that would not load back is not written: not saved, nothing written, the file on disk kept', async () => {
+    const good = withSeq(3, [entry()])
+    const goodText = JSON.stringify(good)
+    const broken: [string, Queue][] = [
+      ['an entry with no committedAt', { ...good, pending: [{ ...entry(), committedAt: undefined } as unknown as QueueEntry] }],
+      ['a lastSeen that is not a string', { ...good, lastSeen: { 'C:/work/foo::main': 7 } as unknown as Record<string, string> }],
+      ['a seq that is not a whole number', { ...good, seq: 2.5 }],
+      ['a skipped mark that is not a string', { ...good, pending: [{ ...entry(), skippedAt: 5 } as unknown as QueueEntry] }],
+    ]
+    for (const [name, queue] of broken) {
+      const { io, writes, store } = memoryFs({ [MAIN]: goodText })
+      const result = await saveQueue(io, DATA, queue)
+      expect([name, result.isSaved, writes, store.get(MAIN) === goodText]).toEqual([name, false, [], true])
+      expect([name, result.queue]).toEqual([name, queue])
+      expect([name, (await loadQueue(io, DATA, NOW)).queue]).toEqual([name, good])
+    }
+  })
+
+  test('every queue the transforms build is still written and loads back', async () => {
+    const one = entry()
+    const queues = [
+      emptyQueue(),
+      enqueue(emptyQueue(), one, opts),
+      markSkipped(enqueue(emptyQueue(), one, opts), { repo: one.repo, hash: one.hash }, NOW),
+      Array.from({ length: 12 }, () => entry()).reduce((queue, next) => enqueue(queue, next, opts), emptyQueue()),
+    ]
+    for (const queue of queues) {
+      const { io } = memoryFs()
+      const saved = await saveQueue(io, DATA, queue)
+      expect(saved.isSaved).toBe(true)
+      expect((await loadQueue(io, DATA, NOW)).queue).toEqual(saved.queue)
+    }
+  })
+
   test('lastSeen is carried through untouched', async () => {
     const { io } = memoryFs()
     const queue = { ...emptyQueue(), lastSeen: { 'C:/work/foo': 'a'.repeat(40) } }
