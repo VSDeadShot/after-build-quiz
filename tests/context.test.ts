@@ -380,6 +380,42 @@ const BEGIN = `-----BEGIN ${'PRIVATE'} KEY-----`
 const END = `-----END ${'PRIVATE'} KEY-----`
 const BODY = ['MIIEvQ' + 'A'.repeat(58), 'B'.repeat(64), 'C'.repeat(20) + '=']
 
+// Prefixes that end in a non-secret `name:` / `name=` or a flag: an earlier match must never hide a later secret.
+const PREFIXES = ['Error: ', 'note: ', 'env: ', 'x=1 ', '--verbose ']
+
+// Rule 4b: a quoted value of 8+ characters set to a secret-looking name, anywhere in a line.
+const QUOTED_POSITIVES: [string, string][] = [
+  ['4b camelCase key', 'apiKey: "q9w8e7r6t5"'],
+  ['4b password', `const password = 'correct-horse-battery'`],
+  ['4b quoted JSON name', '"token": "abc123def456"'],
+  ['4b snake_case keyword argument', 'connect(api_key="abcd1234efgh")'],
+  ['4b client secret', `  client_secret: 'abcdefghij',`],
+  ['4b upper-case constant', `const X_API_KEY = 'abcdefgh12'`],
+  ['4b Go short assignment', 'token := "abcdefghijkl"'],
+  ['4b apikey =', 'apikey = "abcd1234efgh"'],
+  ['4b apikey:', "apikey: 'abcd1234efgh'"],
+  ['4b quoted JSON compound name', '"apikey": "abcd1234efgh"'],
+  ['4b prefixed snake_case', 'openai_apikey="abcd1234efgh"'],
+  ['4b header-style name', "'x-apikey': 'abcd1234efgh'"],
+  ['4b camelCase prefix', "const myApikey = 'abcd1234efgh'"],
+  ['4b clientsecret', "  clientsecret: 'abcdefghij',"],
+  ['4b Go short assignment, compound', 'accesstoken := "abcdefghijkl"'],
+  // a non-secret quoted value that holds a quoted secret assignment (the 3c4 audit)
+  ['4b inside a non-secret quoted value', `cmd: "password='hunter2hunter2'"`],
+]
+
+// Rule 10: a Bearer token of 16+ characters, with or without an Authorization name.
+const BEARER_POSITIVES: [string, string][] = [
+  ['10 bare header', `Authorization: Bearer ${S.bearer}`],
+  ['10 JSON header', `"Authorization": "Bearer ${S.bearer}"`],
+  ['10 curl -H', `curl -H "Authorization: Bearer ${S.bearer}" https://api.example.com/v1/me`],
+  ['10 lower-case, template literal', `fetch(url, { headers: { authorization: \`bearer ${S.bearer}\` } })`],
+  ['10 no Authorization name', `const header = 'Bearer ${S.bearer}'`],
+  ['10 a placeholder, then a real token', `# Bearer <your-access-token>, e.g. Bearer ${S.bearer}`],
+  // a placeholder token run that would take a later Bearer with it (the 3c4 audit)
+  ['10 a placeholder run holding a later Bearer', `Bearer <your-access-token>|Bearer ${S.bearer}`],
+]
+
 describe('isSecretLine: patterns', () => {
   test('each pattern matches a line holding its kind of secret', () => {
     const positives: [string, string][] = [
@@ -392,13 +428,6 @@ describe('isSecretLine: patterns', () => {
       ['4a exported', 'export DB_PASSWORD=hunter2hunter2'],
       ['4a name with a trailing part', 'SECRET_KEY_BASE=0123456789abcdef'],
       ['4a quoted, spaced', `  STRIPE_SECRET = 'whsec_abcdefgh'`],
-      ['4b camelCase key', 'apiKey: "q9w8e7r6t5"'],
-      ['4b password', `const password = 'correct-horse-battery'`],
-      ['4b quoted JSON name', '"token": "abc123def456"'],
-      ['4b snake_case keyword argument', 'connect(api_key="abcd1234efgh")'],
-      ['4b client secret', `  client_secret: 'abcdefghij',`],
-      ['4b upper-case constant', `const X_API_KEY = 'abcdefgh12'`],
-      ['4b Go short assignment', 'token := "abcdefghijkl"'],
       ['5 credential URL', 'db = connect("' + 'postgres://' + 'admin:s3cret' + '@db.example.com/app")'],
       ['6 bcrypt hash', `hash: '${S.bcrypt}'`],
       ['7 GitHub token', `auth(${JSON.stringify(S.github)})`],
@@ -464,16 +493,12 @@ describe('isSecretLine: patterns', () => {
     for (const [name, line] of falsePositives) expect([name, isSecretLine(line)]).toEqual([name, true])
   })
 
-  test('run-together compound names are matched (4b quoted, 4a unquoted)', () => {
+  test('quoted values set to secret names are matched (4b, incl. run-together compound names)', () => {
+    for (const [name, line] of QUOTED_POSITIVES) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('run-together compound names are matched unquoted (4a)', () => {
     const positives: [string, string][] = [
-      ['4b apikey =', 'apikey = "abcd1234efgh"'],
-      ['4b apikey:', "apikey: 'abcd1234efgh'"],
-      ['4b quoted JSON name', '"apikey": "abcd1234efgh"'],
-      ['4b prefixed snake_case', 'openai_apikey="abcd1234efgh"'],
-      ['4b header-style name', "'x-apikey': 'abcd1234efgh'"],
-      ['4b camelCase prefix', "const myApikey = 'abcd1234efgh'"],
-      ['4b clientsecret', "  clientsecret: 'abcdefghij',"],
-      ['4b Go short assignment', 'accesstoken := "abcdefghijkl"'],
       ['4a unquoted lower-case', 'apikey=abcd1234efgh'],
       ['4a exported, spaced', 'export secretkey = abcd1234efgh'],
       ['4a prefixed name', 'stripe_webhooksecret=whsec_abcdefgh'],
@@ -483,15 +508,13 @@ describe('isSecretLine: patterns', () => {
   })
 
   test('Bearer tokens are matched with or without an Authorization name (10)', () => {
-    const positives: [string, string][] = [
-      ['10 bare header', `Authorization: Bearer ${S.bearer}`],
-      ['10 JSON header', `"Authorization": "Bearer ${S.bearer}"`],
-      ['10 curl -H', `curl -H "Authorization: Bearer ${S.bearer}" https://api.example.com/v1/me`],
-      ['10 lower-case, template literal', `fetch(url, { headers: { authorization: \`bearer ${S.bearer}\` } })`],
-      ['10 no Authorization name', `const header = 'Bearer ${S.bearer}'`],
-      ['10 a placeholder, then a real token', `# Bearer <your-access-token>, e.g. Bearer ${S.bearer}`],
-    ]
-    for (const [name, line] of positives) expect([name, isSecretLine(line)]).toEqual([name, true])
+    for (const [name, line] of BEARER_POSITIVES) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('every 4b and Bearer positive is still matched behind a non-secret prefix (no earlier match hides it)', () => {
+    for (const [name, line] of [...QUOTED_POSITIVES, ...BEARER_POSITIVES]) {
+      for (const prefix of PREFIXES) expect([name, prefix, isSecretLine(prefix + line)]).toEqual([name, prefix, true])
+    }
   })
 
   test('the same Bearer line matches on every call (no regex state carried between calls)', () => {
@@ -565,7 +588,6 @@ describe('isSecretLine: mid-line assignments (4c)', () => {
   })
 
   test('every positive is still matched behind a non-secret prefix (no earlier match hides it)', () => {
-    const PREFIXES = ['Error: ', 'note: ', 'env: ', 'x=1 ', '--verbose ']
     for (const [name, line] of POSITIVES) {
       for (const prefix of PREFIXES) expect([name, prefix, isSecretLine(prefix + line)]).toEqual([name, prefix, true])
     }

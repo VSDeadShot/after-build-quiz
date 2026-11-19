@@ -82,8 +82,9 @@ const SECRET_PATTERNS = [
 ]
 
 // A quoted literal of 8+ non-space characters assigned to a secret-looking name, anywhere:
-// `apiKey: "…"`, `password = '…'`, `"token": "…"`, `api_key="…"`, `token := "…"`.
-const ASSIGNED = /(?<![\w$-])["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(["'`])((?:(?!\2)\S){8,})\2/g
+// `apiKey: "…"`, `password = '…'`, `"token": "…"`, `api_key="…"`, `token := "…"`. The quoted value is read
+// in a lookahead, not consumed, so a non-secret match (`cmd: "…"`) never hides a secret assignment inside it.
+const ASSIGNED = /(?<![\w$-])["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(?=(["'`])((?:(?!\2)\S){8,})\2)/g
 const UPPER_NAME = /^[A-Z0-9_]*(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*$/
 const SECRET_WORD = /^(?:key|secret|password|passwd|token)$/i
 
@@ -96,8 +97,9 @@ const isSecretName = (name: string) => {
 
 // 10: a Bearer token of 16+ characters, with or without an Authorization name on the line (bare header,
 // JSON header, curl -H). An obvious placeholder is not a secret: <token>, $TOKEN, ${TOKEN}, {{token}},
-// {token}, YOUR_TOKEN, all x's (xxxx-xxxx), or a bare ellipsis.
-const BEARER = /\bbearer\s+([^\s"'`,;)]{16,})/gi
+// {token}, YOUR_TOKEN, all x's (xxxx-xxxx), or a bare ellipsis. The token is read in a lookahead, not
+// consumed, so a placeholder run (`<token>|Bearer …`) never hides a later Bearer token inside it.
+const BEARER = /\bbearer\s+(?=([^\s"'`,;)]{16,}))/gi
 const PLACEHOLDER = /^(?:[<${]|your[_-]|x+(?:[-_.]x+)*$|(?:\.\.\.|…)$)/i
 
 // matchAll works on a copy of BEARER, so no lastIndex carries over between calls.
