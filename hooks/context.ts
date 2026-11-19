@@ -84,7 +84,8 @@ const SECRET_PATTERNS = [
 // A quoted literal of 8+ non-space characters assigned to a secret-looking name, anywhere:
 // `apiKey: "…"`, `password = '…'`, `"token": "…"`, `api_key="…"`, `token := "…"`. The quoted value is read
 // in a lookahead, not consumed, so a non-secret match (`cmd: "…"`) never hides a secret assignment inside it.
-const ASSIGNED = /(?<![\w$-])["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(?=(["'`])((?:(?!\2)\S){8,})\2)/g
+// The name is a whole word, or follows a `-`/`--` flag prefix (`--token="…"`), as in 4c.
+const ASSIGNED = /(?<![\w$])(?<!\w-)["']?([A-Za-z_$][\w$-]*)["']?\s*(?::=|[:=])\s*(?=(["'`])((?:(?!\2)\S){8,})\2)/g
 const UPPER_NAME = /^[A-Z0-9_]*(?:KEY|SECRET|PASSWORD|PASSWD|TOKEN)(?:_[A-Z0-9]+)*$/
 const SECRET_WORD = /^(?:key|secret|password|passwd|token)$/i
 

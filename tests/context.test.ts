@@ -382,6 +382,8 @@ const BODY = ['MIIEvQ' + 'A'.repeat(58), 'B'.repeat(64), 'C'.repeat(20) + '=']
 
 // Prefixes that end in a non-secret `name:` / `name=` or a flag: an earlier match must never hide a later secret.
 const PREFIXES = ['Error: ', 'note: ', 'env: ', 'x=1 ', '--verbose ']
+// Command-line flag forms before a quoted (4b) assignment: a plain flag, `--name=value`, a quoted flag value.
+const FLAG_PREFIXES = ['mytool --verbose ', 'mytool --mode=fast ', 'mytool --label="nightly-build" ', 'mytool -v ']
 
 // Rule 4b: a quoted value of 8+ characters set to a secret-looking name, anywhere in a line.
 const QUOTED_POSITIVES: [string, string][] = [
@@ -402,6 +404,10 @@ const QUOTED_POSITIVES: [string, string][] = [
   ['4b Go short assignment, compound', 'accesstoken := "abcdefghijkl"'],
   // a non-secret quoted value that holds a quoted secret assignment (the 3c4 audit)
   ['4b inside a non-secret quoted value', `cmd: "password='hunter2hunter2'"`],
+  // a quoted value after a command-line flag prefix
+  ['4b a --flag="value"', 'mytool --token="abcdefgh1234"'],
+  ['4b a --compound-flag=\'value\'', "curl --api-key='abc123def456'"],
+  ['4b a --flag="value" after another flag', 'psql --host=db --password="hunter2hunter2"'],
 ]
 
 // Rule 10: a Bearer token of 16+ characters, with or without an Authorization name.
@@ -470,6 +476,7 @@ describe('isSecretLine: patterns', () => {
       'header: eyJhbGciOi.eyJzdWIi.sig',
       'git clone https://user@example.com/repo.git',
       'BEGIN the key exchange',
+      '2-token="abcdefgh1234"', // a name glued to a word by `-` is not a whole name (4b keeps it whole as 4c does)
     ]
     for (const line of negatives) expect([line, isSecretLine(line)]).toEqual([line, false])
   })
@@ -514,6 +521,12 @@ describe('isSecretLine: patterns', () => {
   test('every 4b and Bearer positive is still matched behind a non-secret prefix (no earlier match hides it)', () => {
     for (const [name, line] of [...QUOTED_POSITIVES, ...BEARER_POSITIVES]) {
       for (const prefix of PREFIXES) expect([name, prefix, isSecretLine(prefix + line)]).toEqual([name, prefix, true])
+    }
+  })
+
+  test('every 4b positive is still matched behind command-line flag forms', () => {
+    for (const [name, line] of QUOTED_POSITIVES) {
+      for (const prefix of FLAG_PREFIXES) expect([name, prefix, isSecretLine(prefix + line)]).toEqual([name, prefix, true])
     }
   })
 
