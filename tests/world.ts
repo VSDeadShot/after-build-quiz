@@ -5,13 +5,14 @@
 import { mock } from 'claude-code/testing'
 import type { On, PromptSubmitInput } from 'claude-code'
 
+import { safeDataDirOf } from '../hooks/paths.ts'
 import { emptyQueue, saveQueue } from '../hooks/queue.ts'
 import type { QueueEntry } from '../hooks/queue.ts'
 import { fakeGit, memoryFs } from './fake-git.ts'
 import type { FakeRepo } from './fake-git.ts'
 
 export const STARTED = Date.parse('2026-10-10T08:30:00Z')
-export const DATA = 'C:/Users/someone/.after-build-quiz'
+export const DATA = safeDataDirOf('C:/Users/someone/.after-build-quiz', { isSafe: true })
 export const QUEUE = `${DATA}/queue.json`
 export const SESSION = 'session-one'
 export const OLD = '2026-09-01T10:00:00Z'

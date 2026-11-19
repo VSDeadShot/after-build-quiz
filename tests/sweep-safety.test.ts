@@ -1,13 +1,14 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Run } from '../hooks/git.ts'
+import { safeDataDirOf } from '../hooks/paths.ts'
 import type { Exists } from '../hooks/paths.ts'
 import { emptyQueue, loadQueue, saveQueue } from '../hooks/queue.ts'
 import type { QueueIO } from '../hooks/queue.ts'
 import { sweepRepos } from '../hooks/sweep.ts'
 import { commit, fakeGit, makeRepo, memoryFs } from './fake-git.ts'
 
-const DATA = 'C:/data/.after-build-quiz'
+const DATA = safeDataDirOf('C:/data/.after-build-quiz', { isSafe: true })
 const NOW = '2026-10-10T09:00:00.000Z'
 const OLD = '2026-09-01T10:00:00Z'
 const READ_ONLY = new Set(['rev-parse', 'log', 'show', 'cat-file', 'config'])

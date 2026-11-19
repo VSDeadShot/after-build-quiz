@@ -2,11 +2,12 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { detectCommits, parseCommit } from '../hooks/detect.ts'
 import type { Run } from '../hooks/git.ts'
+import { safeDataDirOf } from '../hooks/paths.ts'
 import { emptyQueue, loadQueue, saveQueue } from '../hooks/queue.ts'
 import type { QueueIO } from '../hooks/queue.ts'
 import { amend, CODE_20, commit, DOCS_ONLY, fakeGit, makeRepo, memoryFs } from './fake-git.ts'
 
-const DATA = 'C:/data/.after-build-quiz'
+const DATA = safeDataDirOf('C:/data/.after-build-quiz', { isSafe: true })
 const STARTED = Date.parse('2026-10-10T08:30:00Z')
 const NOW = '2026-10-10T08:30:10.000Z'
 const OLD = '2026-09-01T10:00:00Z'

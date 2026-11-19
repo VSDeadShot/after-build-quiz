@@ -7,7 +7,7 @@ import { checkDataDir, resolveDataDir, safeDataDirOf } from './paths.ts'
 import type { DataDirVerdict, SafeDataDir } from './paths.ts'
 import { isPausingPrompt, pauseIfLive, statusLine, viewOf } from './pause.ts'
 import type { QuizView } from './pause.ts'
-import { loadQueue } from './queue.ts'
+import { peekQueue } from './queue.ts'
 import type { QueueIO } from './queue.ts'
 import { readSettings } from './settings.ts'
 import type { Settings } from './settings.ts'
@@ -144,7 +144,7 @@ async function pauseQuiz($: EngineInterface, state: State, endingSession?: strin
     state.quiz = viewOf(updated.quiz, sessionId)
     if (endingSession !== undefined) return
 
-    const loaded = await loadQueue(ioOf($), dataDir, now, { isReadOnly: true })
+    const loaded = await peekQueue(ioOf($), dataDir)
     $.ui.status(statusLine(loaded.queue, state.quiz))
   } catch (error) {
     debug($, `quiz not paused: ${oneLine(error)}`)
@@ -183,7 +183,7 @@ async function readQuizView($: EngineInterface, state: State, dataDir: string): 
 async function showStatus($: EngineInterface, state: State) {
   try {
     const dataDir = await dataDirOf($, state)
-    const loaded = await loadQueue(ioOf($), dataDir, await isoNow($), { isReadOnly: true })
+    const loaded = await peekQueue(ioOf($), dataDir)
     if (loaded.notice !== undefined) noticeOnce($, state, 'queue', loaded.notice)
     state.quiz = await readQuizView($, state, dataDir)
     $.ui.status(statusLine(loaded.queue, state.quiz))

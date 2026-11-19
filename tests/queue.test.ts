@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import type { DetectDeps } from '../hooks/detect.ts'
 import type { Run } from '../hooks/git.ts'
+import { safeDataDirOf } from '../hooks/paths.ts'
 import type { Exists } from '../hooks/paths.ts'
 import {
-  COMMIT_FORMAT, emptyQueue, enqueue, loadQueue, markSkipped, parseCommitLine, saveQueue, selectNext,
+  COMMIT_FORMAT, emptyQueue, enqueue, loadQueue, markSkipped, parseCommitLine, peekQueue, saveQueue, selectNext,
 } from '../hooks/queue.ts'
 import type { Queue, QueueEntry, QueueIO } from '../hooks/queue.ts'
+import type { SweepDeps } from '../hooks/sweep.ts'
 
-const DATA = 'C:/data/.after-build-quiz'
+const DATA = safeDataDirOf('C:/data/.after-build-quiz', { isSafe: true })
 const MAIN = `${DATA}/queue.json`
 const TMP = `${DATA}/queue.json.tmp`
 const NOW = '2026-10-10T08:30:00.000Z'
@@ -614,7 +617,7 @@ describe('loadQueue / saveQueue', () => {
     const { io, makeUnreadable, writes } = memoryFs({ [TMP]: JSON.stringify(withSeq(6, [entry(), entry()])) })
     makeUnreadable(MAIN)
 
-    const loaded = await loadQueue(io, DATA, NOW, { isReadOnly: true })
+    const loaded = await peekQueue(io, DATA)
 
     expect(loaded).toEqual({ queue: emptyQueue(), isWritable: false, notice: UNREADABLE })
     expect(writes).toEqual([])
@@ -647,5 +650,27 @@ describe('loadQueue / saveQueue', () => {
     const queue = { ...emptyQueue(), lastSeen: { 'C:/work/foo': 'a'.repeat(40) } }
     const saved = await saveQueue(io, DATA, queue)
     expect((await loadQueue(io, DATA, NOW)).queue.lastSeen).toEqual(saved.queue.lastSeen)
+  })
+
+  test('only a checked data folder is accepted for writes (type-level: tsc checks these directives)', () => {
+    const unchecked = (io: QueueIO, run: Run, exists: Exists) => {
+      // @ts-expect-error a plain string is not a SafeDataDir
+      void saveQueue(io, 'C:/data', emptyQueue())
+      // @ts-expect-error a plain string is not a SafeDataDir
+      void loadQueue(io, 'C:/data', NOW)
+      void peekQueue(io, 'C:/data') // reading only: a plain path is fine
+      const detect: DetectDeps = {
+        run, io, isWindows: true, minChangedLines: 10, queueCap: 10,
+        // @ts-expect-error a plain string is not a SafeDataDir
+        dataDir: 'C:/data',
+      }
+      const sweep: SweepDeps = {
+        run, io, exists, isWindows: true, minChangedLines: 10, queueCap: 10,
+        // @ts-expect-error a plain string is not a SafeDataDir
+        dataDir: 'C:/data',
+      }
+      return [detect, sweep]
+    }
+    expect(typeof unchecked).toBe('function')
   })
 })

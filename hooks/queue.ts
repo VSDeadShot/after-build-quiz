@@ -1,6 +1,6 @@
 import { git } from './git.ts'
 import type { Run } from './git.ts'
-import type { Exists } from './paths.ts'
+import type { Exists, SafeDataDir } from './paths.ts'
 
 // The pending-quiz queue: pure transforms plus crash-safe load/save over an
 // injected fs (the plugin passes $.fs). See SPEC behaviour 1–3 and "Storage".
@@ -220,13 +220,24 @@ const readState = async (io: QueueIO, path: string): Promise<FileState> => {
 
 const filesOf = (dataDir: string) => ({ main: `${dataDir}/queue.json`, tmp: `${dataDir}/queue.json.tmp` })
 
-// isReadOnly: never write, not even the copy-aside (the status line only reads).
-export const loadQueue = async (
+type QueueLoad = { queue: Queue; notice?: string; isWritable: boolean }
+
+// Loading to change the queue: a corrupt queue.json is copied aside, so only a data folder checked to
+// be outside any repo (SafeDataDir) is accepted.
+export const loadQueue = (io: QueueIO, dataDir: SafeDataDir, now: string): Promise<QueueLoad> =>
+  loadAt(io, dataDir, now, { isReadOnly: false })
+
+// Reading only, for the status line: a plain path is enough, and nothing is ever written, not even
+// the copy aside.
+export const peekQueue = (io: QueueIO, dataDir: string): Promise<QueueLoad> =>
+  loadAt(io, dataDir, '', { isReadOnly: true })
+
+const loadAt = async (
   io: QueueIO,
   dataDir: string,
   now: string,
-  options: { isReadOnly?: boolean } = {},
-): Promise<{ queue: Queue; notice?: string; isWritable: boolean }> => {
+  options: { isReadOnly: boolean },
+): Promise<QueueLoad> => {
   const { main, tmp } = filesOf(dataDir)
   const mainState = await readState(io, main)
   const tmpState = await readState(io, tmp)
@@ -281,7 +292,7 @@ export const loadQueue = async (
 // loadQueue takes the valid one with the higher seq.
 export const saveQueue = async (
   io: QueueIO,
-  dataDir: string,
+  dataDir: SafeDataDir,
   queue: Queue,
 ): Promise<{ isSaved: boolean; queue: Queue }> => {
   const { main, tmp } = filesOf(dataDir)

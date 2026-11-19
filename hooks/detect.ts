@@ -2,6 +2,7 @@ import { peekActive } from './active.ts'
 import { git } from './git.ts'
 import type { Run } from './git.ts'
 import { isAbsolute, normalizeDir } from './paths.ts'
+import type { SafeDataDir } from './paths.ts'
 import { COMMIT_FORMAT, enqueue, loadQueue, parseCommitLine, saveQueue } from './queue.ts'
 import type { CommitRef, Queue, QueueEntry, QueueIO } from './queue.ts'
 import { classify } from './trivial.ts'
@@ -133,7 +134,7 @@ export const repoCandidates = (
 export type DetectDeps = {
   run: Run
   io: QueueIO
-  dataDir: string
+  dataDir: SafeDataDir
   isWindows: boolean
   minChangedLines: number
   queueCap: number

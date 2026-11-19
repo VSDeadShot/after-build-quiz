@@ -2,7 +2,7 @@ import { authorArgs, commitsIn, findHead, logMine, markSeen, queueWorthy, quizCo
 import type { Head } from './detect.ts'
 import type { Run } from './git.ts'
 import { isAbsolute, normalizeDir } from './paths.ts'
-import type { Exists } from './paths.ts'
+import type { Exists, SafeDataDir } from './paths.ts'
 import { loadQueue, oneLine, saveQueue } from './queue.ts'
 import type { CommitRef, Queue, QueueIO } from './queue.ts'
 
@@ -17,7 +17,7 @@ export type SweepDeps = {
   run: Run
   io: QueueIO
   exists: Exists
-  dataDir: string
+  dataDir: SafeDataDir
   isWindows: boolean
   minChangedLines: number
   queueCap: number
