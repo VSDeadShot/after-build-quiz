@@ -1,10 +1,14 @@
 import { git } from './git.ts'
 import type { Run } from './git.ts'
 import type { Exists, SafeDataDir } from './paths.ts'
+import { loadStore, peekStore, saveStore } from './store.ts'
+import type { StoreFile, StoreIO } from './store.ts'
+
+export { oneLine } from './store.ts'
 
 // The pending-quiz queue: pure transforms plus crash-safe load/save over an
-// injected fs (the plugin passes $.fs). See SPEC behaviour 1–3 and "Storage".
-// Nothing here throws into the user's workflow.
+// injected fs (the plugin passes $.fs; the storage itself is store.ts). See
+// SPEC behaviour 1–3 and "Storage". Nothing here throws into the user's workflow.
 
 export type QueueEntry = {
   repo: string
@@ -43,11 +47,7 @@ export type Queue = {
   seenAt: Record<string, string> // repo root → last activity (ISO); ranks repos for the sweep
 }
 
-export type QueueIO = {
-  read: (path: string) => Promise<string>
-  write: (path: string, text: string) => Promise<void>
-  exists: (path: string) => Promise<boolean>
-}
+export type QueueIO = StoreIO
 
 export type ParsedCommit = {
   hash: string
@@ -193,118 +193,75 @@ const isQueue = (value: unknown): value is Queue =>
   (value.seenAt === undefined ||
     (isRecord(value.seenAt) && Object.values(value.seenAt).every(when => typeof when === 'string')))
 
-type FileState =
-  | { state: 'absent' }
-  | { state: 'unreadable'; reason: string }
-  | { state: 'invalid'; text: string }
-  | { state: 'valid'; queue: Queue }
-
-export const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim()
-
-const readState = async (io: QueueIO, path: string): Promise<FileState> => {
-  let text: string
-  try {
-    if (!(await io.exists(path))) return { state: 'absent' }
-    text = await io.read(path)
-  } catch (error) {
-    return { state: 'unreadable', reason: oneLine(String(error)) }
-  }
-  try {
-    const value: unknown = JSON.parse(text)
-    // a file from before seenAt existed loads with an empty one
-    return isQueue(value) ? { state: 'valid', queue: { ...value, seenAt: value.seenAt ?? {} } } : { state: 'invalid', text }
-  } catch {
-    return { state: 'invalid', text }
-  }
+// Stored by store.ts (crash-safe load/save shared with active.json).
+const QUEUE_FILE: StoreFile<Queue> = {
+  name: 'queue',
+  // a file from before seenAt existed loads with an empty one
+  parse: value => (isQueue(value) ? { ...value, seenAt: value.seenAt ?? {} } : undefined),
 }
-
-const filesOf = (dataDir: string) => ({ main: `${dataDir}/queue.json`, tmp: `${dataDir}/queue.json.tmp` })
 
 type QueueLoad = { queue: Queue; notice?: string; isWritable: boolean }
 
+const unreadable = (reason: string): QueueLoad => ({
+  queue: emptyQueue(),
+  isWritable: false,
+  notice: `after-build-quiz: could not read queue.json (${reason}); using an empty queue and not overwriting it this session`,
+})
+
 // Loading to change the queue: a corrupt queue.json is copied aside, so only a data folder checked to
 // be outside any repo (SafeDataDir) is accepted.
-export const loadQueue = (io: QueueIO, dataDir: SafeDataDir, now: string): Promise<QueueLoad> =>
-  loadAt(io, dataDir, now, { isReadOnly: false })
-
-// Reading only, for the status line: a plain path is enough, and nothing is ever written, not even
-// the copy aside.
-export const peekQueue = (io: QueueIO, dataDir: string): Promise<QueueLoad> =>
-  loadAt(io, dataDir, '', { isReadOnly: true })
-
-const loadAt = async (
-  io: QueueIO,
-  dataDir: string,
-  now: string,
-  options: { isReadOnly: boolean },
-): Promise<QueueLoad> => {
-  const { main, tmp } = filesOf(dataDir)
-  const mainState = await readState(io, main)
-  const tmpState = await readState(io, tmp)
-
-  // A queue.json that cannot be read is never used or overwritten, whatever the `.tmp` copy holds:
-  // loading the copy as writable would let the next save overwrite a file we could not read.
-  if (mainState.state === 'unreadable') {
-    return {
-      queue: emptyQueue(),
-      isWritable: false,
-      notice: `after-build-quiz: could not read queue.json (${mainState.reason}); using an empty queue and not overwriting it this session`,
-    }
-  }
-
-  const valid = [mainState, tmpState].flatMap(file => (file.state === 'valid' ? [file.queue] : []))
-  if (valid.length > 0) {
-    const newest = valid.reduce((best, queue) => (queue.seq > best.seq ? queue : best))
-    return { queue: newest, isWritable: true }
-  }
-
-  if (mainState.state === 'invalid' && options.isReadOnly === true) {
-    return {
-      queue: emptyQueue(),
-      isWritable: false,
-      notice: 'after-build-quiz: queue.json is corrupt; it will be copied aside at the next commit',
-    }
-  }
-
-  if (mainState.state === 'invalid') {
-    const asideName = `queue.corrupt-${now.replace(/[:.]/g, '-')}.json`
-    try {
-      await io.write(`${dataDir}/${asideName}`, mainState.text)
-    } catch {
+export const loadQueue = async (io: QueueIO, dataDir: SafeDataDir, now: string): Promise<QueueLoad> => {
+  const loaded = await loadStore(io, dataDir, QUEUE_FILE, now)
+  switch (loaded.kind) {
+    case 'unreadable':
+      return unreadable(loaded.reason)
+    case 'found':
+      return { queue: loaded.value, isWritable: true }
+    case 'asideFailed':
       return {
         queue: emptyQueue(),
         isWritable: false,
         notice: 'after-build-quiz: queue.json is corrupt and could not be copied aside; not overwriting it this session',
       }
-    }
-    return {
-      queue: emptyQueue(),
-      isWritable: true,
-      notice: `after-build-quiz: queue.json was corrupt; saved it as ${asideName} and started a fresh queue`,
-    }
+    case 'setAside':
+      return {
+        queue: emptyQueue(),
+        isWritable: true,
+        notice: `after-build-quiz: queue.json was corrupt; saved it as ${loaded.asideName} and started a fresh queue`,
+      }
+    case 'absent':
+      return { queue: emptyQueue(), isWritable: true }
   }
-
-  return { queue: emptyQueue(), isWritable: true }
 }
 
-// Crash-safe without rename ($.fs has none): the full queue goes to the tmp
-// copy first, then to queue.json, so at every moment one of them is complete;
-// loadQueue takes the valid one with the higher seq.
+// Reading only, for the status line: a plain path is enough, and nothing is ever written, not even
+// the copy aside.
+export const peekQueue = async (io: QueueIO, dataDir: string): Promise<QueueLoad> => {
+  const peeked = await peekStore(io, dataDir, QUEUE_FILE)
+  switch (peeked.kind) {
+    case 'unreadable':
+      return unreadable(peeked.reason)
+    case 'found':
+      return { queue: peeked.value, isWritable: true }
+    case 'corrupt':
+      return {
+        queue: emptyQueue(),
+        isWritable: false,
+        notice: 'after-build-quiz: queue.json is corrupt; it will be copied aside at the next commit',
+      }
+    case 'absent':
+      return { queue: emptyQueue(), isWritable: true }
+  }
+}
+
+// Each save raises seq; the queue is written as it is, unchecked.
 export const saveQueue = async (
   io: QueueIO,
   dataDir: SafeDataDir,
   queue: Queue,
 ): Promise<{ isSaved: boolean; queue: Queue }> => {
-  const { main, tmp } = filesOf(dataDir)
   const next: Queue = { ...queue, seq: queue.seq + 1 }
-  const text = `${JSON.stringify(next, null, 2)}\n`
-  try {
-    await io.write(tmp, text)
-    await io.write(main, text)
-    return { isSaved: true, queue: next }
-  } catch {
-    return { isSaved: false, queue }
-  }
+  return (await saveStore(io, dataDir, QUEUE_FILE, next)) ? { isSaved: true, queue: next } : { isSaved: false, queue }
 }
 
 // The status line: "N quizzes pending", or nothing when none are.

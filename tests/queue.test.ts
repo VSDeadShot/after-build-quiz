@@ -574,6 +574,18 @@ describe('loadQueue / saveQueue', () => {
     expect(loaded.notice).toBeUndefined()
   })
 
+  test('a queue file from before seenAt loads with an empty one: valid, writable, nothing copied aside', async () => {
+    const saved = withSeq(5, [entry()])
+    const old: Partial<Queue> = { ...saved }
+    delete old.seenAt
+    const { io, store, writes } = memoryFs({ [MAIN]: JSON.stringify(old) })
+    expect('seenAt' in JSON.parse(store.get(MAIN)!)).toBe(false)
+
+    expect(await loadQueue(io, DATA, NOW)).toEqual({ queue: { ...saved, seenAt: {} }, isWritable: true })
+    expect(await peekQueue(io, DATA)).toEqual({ queue: { ...saved, seenAt: {} }, isWritable: true })
+    expect(writes).toEqual([])
+  })
+
   test('a skipped mark that is not a string counts as corrupt', async () => {
     const saved = withSeq(4, [{ ...entry(), skippedAt: 5 } as unknown as QueueEntry])
     const { io, store } = memoryFs({ [MAIN]: JSON.stringify(saved) })

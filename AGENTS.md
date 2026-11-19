@@ -54,4 +54,4 @@ work.
 ## Layout
 hooks/register.ts (wiring) · git.ts · detect.ts · sweep.ts · queue.ts · context.ts · active.ts (the quiz in
 progress: active.json) · quiz.ts (generation, grading, notices) · pause.ts · log.ts · stats.ts · calibrate.ts ·
-paths.ts · types/index.d.ts · tests/ · tests/calibration/
+paths.ts · store.ts (load/save shared by queue.json and active.json) · types/index.d.ts · tests/ · tests/calibration/
