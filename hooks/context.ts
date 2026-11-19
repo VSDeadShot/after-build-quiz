@@ -103,10 +103,45 @@ const PLACEHOLDER = /^(?:[<${]|your[_-]|x+(?:[-_.]x+)*$|(?:\.\.\.|…)$)/i
 // matchAll works on a copy of BEARER, so no lastIndex carries over between calls.
 const hasBearerToken = (line: string) => [...line.matchAll(BEARER)].some(match => !PLACEHOLDER.test(match[1]!))
 
+// 4c: an unquoted value set to a secret name anywhere in a line (a sentence, a URL query, a YAML value),
+// where 4a only matches a line that starts with the name. The name is a whole word, or follows a `-`/`--`
+// flag prefix (`--token=…`); the separator is `=` (not `==`), `:=` or `:` (not `::` or `://`); the value
+// is 8+ characters (`%` included, for URL-encoded values) and ends at the line's end, whitespace, closing
+// punctuation or a sentence's end. So `process.env.X`, `getKey()` and any dotted value never match (a JWT
+// has its own pattern). The value is read in a lookahead, not consumed: a match takes only the name and
+// separator, so a non-secret one (`Error: `, `env=`) never hides a secret assignment inside its value.
+const MIDLINE = /(?<![\w$])(?<!\w-)([A-Za-z_][\w-]*)\s*(:=|=(?![=>])|:(?![:=/]))\s*(?=([A-Za-z0-9_\-+/=~%]{8,})(?=$|[\s,;&)\]}"'`]|[.!?](?:\s|$)))/g
+const TYPE_LIKE = /^(?:[A-Z][a-z0-9]+){2,}$/ // Uint8Array, ApiKeyConfig
+// A Windows %NAME% reference is a placeholder, as $NAME and ${NAME} are; a value that merely holds a % (a
+// URL-encoded one) is not.
+const PERCENT_REF = /^%[A-Za-z0-9_]+%$/
+const MIDLINE_WORD = /^(?:secret|password|passwd|token)$/i
+
+// A lower-case or camelCase secret name: its last word is secret, password, passwd or token, or its last
+// word or last two joined are a compound (apikey, api_key, apiKey, x-api-key, private_key). A bare `key`
+// is not one: sort_key, cache_key, primary_key.
+const isMidlineName = (name: string) => {
+  const words = name.split(/[_-]|(?<=[a-z0-9])(?=[A-Z])/)
+  const last = words.at(-1) ?? ''
+  return MIDLINE_WORD.test(last) || COMPOUND_NAME.test(last) || COMPOUND_NAME.test(words.slice(-2).join(''))
+}
+
+// An env-style upper-case name set with `=` or `:=` takes any value. Anything else (a lower-case name, or
+// any name before `:`, as prose and type annotations use) needs a letter and a digit, and after `:` a value
+// not shaped like a type. A 3c3 placeholder or a %NAME% reference never counts.
+const isMidlineSecret = ([, name = '', separator = '', value = '']: RegExpMatchArray) => {
+  if (PLACEHOLDER.test(value) || PERCENT_REF.test(value)) return false
+  const isUpper = UPPER_NAME.test(name)
+  if (!isUpper && !isMidlineName(name)) return false
+  if (isUpper && separator !== ':') return true
+  return /[A-Za-z]/.test(value) && /[0-9]/.test(value) && !(separator === ':' && TYPE_LIKE.test(value))
+}
+
 export const isSecretLine = (line: string): boolean =>
   SECRET_PATTERNS.some(pattern => pattern.test(line)) ||
   [...line.matchAll(ASSIGNED)].some(match => isSecretName(match[1]!)) ||
-  hasBearerToken(line)
+  hasBearerToken(line) ||
+  [...line.matchAll(MIDLINE)].some(isMidlineSecret)
 
 const BLOCK_BEGIN = /-----BEGIN [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/
 const BLOCK_END = /-----END [A-Z0-9 ]*KEY[A-Z0-9 ]*-----/

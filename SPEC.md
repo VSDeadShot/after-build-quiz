@@ -201,11 +201,15 @@ Secret filtering is by file name and by line pattern: a secret that matches neit
 recognised shape assigned to an unremarkable name, or one split across lines — still reaches the context
 pack, and a grader gap may quote it into the log. Redacted lines can't be cited, so a commit whose main
 change is such a line may fail grounding and expire as `ungrounded`. Known misses: a diff hunk inside a
-long private key that shows neither its BEGIN nor its END line (a partial change to the key body); and an
-unquoted YAML-style `name: value` line with a run-together name such as `apikey: abcd1234efgh5678` (a rule
-for it would also flag type annotations such as `apikey: ApiKeyConfig`).
-Assignment-style secrets inside a sentence, e.g. `pasted API_TOKEN=tok_live_… here`, are not redacted yet,
-in the context pack or the log: the assignment rule only matches a line that starts with the name.
+long private key that shows neither its BEGIN nor its END line (a partial change to the key body); an
+unquoted value with no digit after a lower-case or camelCase secret name, or after a `:`
+(`password=correcthorsebattery`, `apikey: abcdefghijkl`); after a `:`, a value shaped like a type name
+(`secret: Hunter2Hunter2`); an unquoted dotted value after a secret name that is not a JWT
+(`token=abc123.def456ghi`); a secret passed as a separate command-line argument rather than with `=`
+(`--password abc123def456`); and a bare `key` name (`key=…`, `sort_key=…`), which is not read as a secret
+name.
+Commit subjects in `queue.json` and `active.json`, and a held answer in `active.json`, are stored as
+written, not redacted: they stay in the private data folder by design.
 `!` shell commands start a model turn without a prompt event, so they do not pause an active quiz (the
 status line keeps showing the pending count). Whether user-invoked skills raise a prompt event is unverified
 on Claude Code 2.1.325; if they do not, they do not pause either. A session that dies without its session

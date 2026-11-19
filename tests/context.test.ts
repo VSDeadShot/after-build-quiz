@@ -531,6 +531,92 @@ describe('isSecretLine: patterns', () => {
   })
 })
 
+// 3c4: an unquoted value set to a secret name in the middle of a line. Values are built at runtime so
+// secret scanners do not flag this file; none is a real credential.
+describe('isSecretLine: mid-line assignments (4c)', () => {
+  const LIVE = 'tok' + '_live_' + 'abc123'
+  const POSITIVES: [string, string][] = [
+    ['upper-case name in a sentence', `set API_TOKEN=${LIVE} before deploy`],
+    ['the log KNOWN GAP sentence', `You pasted API_TOKEN=${S.token} here.`],
+    ['ends a sentence', 'Run it with DB_PASSWORD=hunter2hunter2.'],
+    ['URL query parameter', 'curl https://api.example.com/v1/items?limit=5&access_token=abc123def456ghi'],
+    ['URL query in a request line', 'GET /cb?code=x&token=a1b2c3d4e5f6 HTTP/1.1'],
+    ['URL-encoded value', 'GET /cb?token=abc%2Fdef123xyz HTTP/1.1'],
+    ['unquoted YAML value, run-together name (the 3c3 miss)', 'apikey: abcd1234efgh5678'],
+    ['keyword argument, two-word compound', 'connect(api_key=abc123def456)'],
+    ['second assignment on an export line', 'export FOO=1 SECRET_KEY=abcdefgh12345678'],
+    ['Go short assignment, unquoted', 'token := abc123def456'],
+    ['after a dot', 'config.apiKey=a1b2c3d4e5f6'],
+    ['lower-case name in a sentence', 'log in with password=correct4horse then'],
+    ['header-style name', 'x-api-key: a1b2c3d4e5f6g7h8'],
+    ['upper-case name, letters only, ends at a comma', '[deploy] SIGNING_KEY=abcdefghijklmnop, region=eu'],
+    // an earlier non-secret `name:` / `name=` whose value would run over the secret (review finding 1)
+    ['after a non-secret name and colon', `Error: API_TOKEN=${LIVE} is invalid`],
+    ['after a non-secret YAML key', 'env: password=abc123def456'],
+    ['after a non-secret assignment whose value would run over it', 'set env=API_TOKEN=abcdefgh12345678 first'],
+    // command-line flags (review finding 2)
+    ['a --flag=value', 'mytool --token=abc123def456'],
+    ['a --compound-flag=value', 'curl --api-key=abc123def456ghi https://api.example.com'],
+    ['a --flag=value after another flag', 'psql --host=db --password=abc123def456'],
+  ]
+
+  test('an unquoted value set to a secret name anywhere in a line is matched', () => {
+    for (const [name, line] of POSITIVES) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+
+  test('every positive is still matched behind a non-secret prefix (no earlier match hides it)', () => {
+    const PREFIXES = ['Error: ', 'note: ', 'env: ', 'x=1 ', '--verbose ']
+    for (const [name, line] of POSITIVES) {
+      for (const prefix of PREFIXES) expect([name, prefix, isSecretLine(prefix + line)]).toEqual([name, prefix, true])
+    }
+  })
+
+  test('a dotted value is not 4c\'s: a mid-line JWT is still matched by the JWT rule', () => {
+    const jwt = 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.' + 'eyJ' + 'zdWIiOiIxMjM0In0' + '.' + 'abc123def'
+    expect(isSecretLine(`set token=${jwt} before deploy`)).toBe(true)
+  })
+
+  test('ordinary code, prose and placeholders are not matched', () => {
+    const negatives = [
+      // not a secret name (a bare `key` is not one), or not a whole word
+      'count=5', 'i=0', 'enabled: true',
+      'sort_key=col2_desc_idx', 'cache_key: v2_users_list', 'primary_key: user_id_2024',
+      '?page=2&limit=50&order=created2024desc', 'progress=50%25done',
+      'monkey=banana12bread', 'tokens=abc123def456', 'keyPrefix=abq2queue1x', 'mytoken=abc123def456',
+      'the 1password=desktop8app setting', '2-token=abc123def456',
+      // not an assignment
+      'if (token==abc123def456) return', 'token != abc123def456', 'token => abc123def456', 'token >= abc123def456',
+      'Token::abc123def45', 'open vault-token://abc123def456 in the app',
+      // too short
+      'set API_TOKEN=abc1234 now', 'apikey: abc1234',
+      // no digit: a lower-case name, or any name before `:`
+      'access_token: required', 'DB_PASSWORD: required in production', 'password=placeholder',
+      'secret: SecretManagerClient',
+      // a type-shaped value after `:`
+      'secret: Uint8Array', 'token: Base64String', 'apiKey: ApiKey2Config',
+      // a dotted reference or a call
+      'token = config2024.token', 'apikey = getKey2024()',
+      // 3c3 placeholders
+      'set API_TOKEN=YOUR_TOKEN_HERE first', 'the example uses API_KEY=xxxxxxxxxxxx here',
+      'api_key: your-api-key-123', 'run with TOKEN=${TOKEN} set', 'run with TOKEN=<token> set',
+      'token: {{ token }}', 'login with password=$DB_PASSWORD', 'token: ...',
+      // a Windows %NAME% reference, as $NAME and ${NAME} (a value that merely holds a % is still matched)
+      'set API_TOKEN=%API_TOKEN_VALUE% first',
+    ]
+    for (const line of negatives) expect([line, isSecretLine(line)]).toEqual([line, false])
+  })
+
+  test('accepted false positives are matched (redacting them is the safe side)', () => {
+    const falsePositives: [string, string][] = [
+      ['a code identifier holding a digit', 'const token = tokenFromEnv2'],
+      ['a TTL on a token name', 'cache TOKEN_TTL=3600seconds here'],
+      ['a pagination token', 'next_page_token=CiAKGjBpNDd2'],
+      ['commit prose after a colon', 'Fix SECRET_KEY: rotate2024keys'],
+    ]
+    for (const [name, line] of falsePositives) expect([name, isSecretLine(line)]).toEqual([name, true])
+  })
+})
+
 describe('buildContextPack: secret lines', () => {
   const pad5 = (n: number) => String(n).padStart(5)
   const marked = (n: number, kind: '+' | '-' | ' ') => `${kind === '-' ? ' '.repeat(5) : pad5(n)} ${kind} ${REDACTED}`
@@ -682,6 +768,32 @@ describe('buildContextPack: secret lines', () => {
     expect(pack.text).not.toContain(BODY[0]!)
     expect(pack.omitted).toContain('SPEC.md: 1 line redacted (possible secret)')
     expect(pack.omitted).toContain('README.md: 3 lines redacted (possible secret)')
+  })
+
+  test('a mid-line assignment (4c) is redacted in the message, recent subjects, diff, surrounding code and docs', async () => {
+    const sentence = `Deploy with API_TOKEN=${S.token} set first.`
+    const repo = makeRepo(TOP)
+    commit(repo, { subject: `Note: ${sentence}`, committedAt: '2026-10-01T00:00:00Z' })
+    const made = commit(repo, {
+      subject: 'Add deploy notes',
+      body: `Context.\n${sentence}`,
+      committedAt: '2026-10-02T00:00:00Z',
+      patch: modified('src/deploy.ts', hunk(1, 1, [' line 1', '-old 2', `+${sentence}`, ' line 3'])),
+      blobs: { 'src/deploy.ts': fileOf(['line 1', sentence, 'line 3', 'line 4', sentence]), 'SPEC.md': `# Spec\n${sentence}\nrules\n` },
+    })
+    const { pack } = await build(repo, made)
+    expect(pack.text).not.toContain(S.token)
+    expect(section(pack, 'Commit message')).toContain(`Add deploy notes\n\nContext.\n${REDACTED}`)
+    expect(section(pack, 'Recent commits (newest first)')).toContain(`- ${REDACTED}`)
+    expect(section(pack, 'Diff')).toContain(`${marked(2, '+')}\n`)
+    expect(section(pack, 'Surrounding code at this commit')).toContain(`    5 | ${REDACTED}`)
+    expect(section(pack, 'Repo docs at this commit')).toContain(`### SPEC.md\n# Spec\n${REDACTED}\nrules`)
+    for (const entry of [
+      'commit message: 1 line redacted (possible secret)',
+      'recent commits: 1 line redacted (possible secret)',
+      'src/deploy.ts: 2 lines redacted (possible secret)',
+      'SPEC.md: 1 line redacted (possible secret)',
+    ]) expect(pack.omitted).toContain(entry)
   })
 
   test('a pack with redactions is byte-identical when rebuilt; a clean pack lists no redactions', async () => {

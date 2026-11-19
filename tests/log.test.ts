@@ -256,13 +256,12 @@ describe('appendAttempt: redaction and size', () => {
     expect([entry.gap, entry.question, entry.subject]).toEqual([`You pasted:\n${REDACTED}`, REDACTED, REDACTED])
   })
 
-  // KNOWN GAP (SPEC Known limits), to be fixed by the 3c4 redaction step before 3i. This asserts today's
-  // behaviour on purpose: when mid-line assignments are redacted it fails, and should flip to expect REDACTED.
-  test('KNOWN GAP: an assignment-style secret inside a sentence is NOT redacted yet', async () => {
+  // Was the KNOWN GAP until 3c4 (rule 4c): a mid-line assignment is redacted like a line-start one.
+  test('an assignment-style secret inside a sentence is redacted (4c)', async () => {
     const fs = fakeFs()
-    const gap = `You pasted ${TOKEN_LINE} here.`
-    await append(fs.io, attempt({ gap }))
-    expect((await readLog(fs.io, DIR)).entries[0]!.gap).toBe(gap)
+    await append(fs.io, attempt({ gap: `You pasted ${TOKEN_LINE} here.` }))
+    expect((await readLog(fs.io, DIR)).entries[0]!.gap).toBe(REDACTED)
+    expect(fs.store.get(MAIN)).not.toContain('tok' + '_live')
   })
 
   test('long fields are cut after redaction: answer 8,000, question and gap 2,000, with the marker', async () => {
