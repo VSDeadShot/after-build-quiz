@@ -155,6 +155,8 @@ try {
     check('a quoted non-ASCII name and a name with a space are read', diffRefs.has('café.ts:1') && diffRefs.has('my file.ts:1'))
     check('CRLF lines are numbered and the CR dropped', diffRefs.has('crlf.ts:2') && !text.includes('\r'))
     check('rename found against diff.renames=false', text.includes('=== src/new.ts (renamed from src/old.ts') && diffRefs.has('src/new.ts:6'))
+    check('a removed line is citable by its number before the commit (a.ts:-20; a rename under its new path, new.ts:-6)',
+      diffRefs.has('src/a.ts:-20') && diffRefs.has('src/new.ts:-6') && !diffRefs.has('src/old.ts:-6'))
     check('binary file omitted', omitted.includes('logo.bin: binary, omitted'))
     check('renamed .env and deleted .pem omitted, their contents absent',
       omitted.includes('settings.txt: secret file, omitted') && omitted.includes('certs/server.pem: secret file, omitted') &&

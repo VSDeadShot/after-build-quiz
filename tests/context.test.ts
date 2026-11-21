@@ -58,16 +58,17 @@ const section = (pack: ContextPack, name: string) => {
 }
 
 describe('buildContextPack: the diff', () => {
-  test('numbers hunk lines by the new side; added and context lines are citable, removed lines are not', async () => {
+  test('numbers added and context lines by the new side; a removed line by its number before the commit, as path:-N', async () => {
     const { repo, made } = setup({
       patch: modified('src/a.ts', hunk(10, 10, [' ten', ' eleven', '-old twelve', '+new twelve', '+new thirteen', ' fourteen'], ' function f()')),
     })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.diffRefs)).toEqual(refs('src/a.ts', 10, 14).sort())
+    expect(sorted(pack.diffRefs)).toEqual([...refs('src/a.ts', 10, 14), 'src/a.ts:-12'].sort())
     const diff = section(pack, 'Diff')
     expect(diff).toContain('=== src/a.ts (modified, +2 -1)')
     expect(diff).toContain('@@ -10,4 +10,5 @@ function f()')
-    expect(diff).toContain('   10   ten\n   11   eleven\n      - old twelve\n   12 + new twelve\n   13 + new thirteen\n   14   fourteen')
+    expect(diff).toContain('   10   ten\n   11   eleven\n  -12 - old twelve\n   12 + new twelve\n   13 + new thirteen\n   14   fourteen')
+    expect(diff).toContain('path:-N') // the pack states how a removed line is cited
   })
 
   test('an added file is citable at its lines', async () => {
@@ -77,22 +78,35 @@ describe('buildContextPack: the diff', () => {
     expect(section(pack, 'Diff')).toContain('=== src/new.ts (added, +3 -0)')
   })
 
-  test('a deleted file is citable at its old lines, and says so', async () => {
+  test('a deleted file is citable at its old lines as path:-N, like any removed line, and says so', async () => {
     const { repo, made } = setup({ patch: deleted('src/old.ts', ['alpha', 'beta']) })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.diffRefs)).toEqual(refs('src/old.ts', 1, 2))
+    expect(sorted(pack.diffRefs)).toEqual(['src/old.ts:-1', 'src/old.ts:-2'])
+    expect(pack.diffRefs.has('src/old.ts:1')).toBe(false)
     const diff = section(pack, 'Diff')
     expect(diff).toContain('=== src/old.ts (deleted; line numbers from the parent, +0 -2)')
-    expect(diff).toContain('    1 - alpha\n    2 - beta')
+    expect(diff).toContain('   -1 - alpha\n   -2 - beta')
   })
 
-  test('a renamed file is listed under its new path; a pure rename has no lines', async () => {
+  test('a removed line keeps its number before the commit where the two sides differ (an earlier hunk added lines)', async () => {
+    const { repo, made } = setup({
+      patch: modified('src/a.ts', hunk(1, 1, [' a', '+b', '+c', ' d']), hunk(20, 22, [' x', '-y', '+Y', ' z'])),
+    })
+    const { pack } = await build(repo, made)
+    expect(sorted(pack.diffRefs)).toEqual([...refs('src/a.ts', 1, 4), ...refs('src/a.ts', 22, 24), 'src/a.ts:-21'].sort())
+    expect(pack.diffRefs.has('src/a.ts:-23')).toBe(false) // where y would sit after the commit
+    expect(section(pack, 'Diff')).toContain('   22   x\n  -21 - y\n   23 + Y\n   24   z')
+  })
+
+  test('a renamed file is listed under its new path, its removed lines cited by the new path and the old number; a pure rename has no lines', async () => {
     const { repo, made } = setup({
       patch: renamed('src/before.ts', 'src/after.ts', hunk(3, 3, [' keep', '-was', '+now'])) + renamed('lib/x.ts', 'lib/y.ts'),
     })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.diffRefs)).toEqual(['src/after.ts:3', 'src/after.ts:4'])
+    expect(sorted(pack.diffRefs)).toEqual(['src/after.ts:-4', 'src/after.ts:3', 'src/after.ts:4'])
+    expect([...pack.diffRefs].some(ref => ref.startsWith('src/before.ts:'))).toBe(false)
     const diff = section(pack, 'Diff')
+    expect(diff).toContain('    3   keep\n   -4 - was\n    4 + now')
     expect(diff).toContain('=== src/after.ts (renamed from src/before.ts, +1 -1)')
     expect(diff).toContain('=== lib/y.ts (renamed from lib/x.ts, +0 -0)')
   })
@@ -121,7 +135,7 @@ describe('buildContextPack: the diff', () => {
       '--- a/my file.ts\t\n+++ b/my file.ts\t\n' + hunk(7, 7, ['-c', '+d'])
     const { repo, made } = setup({ patch: quoted + tab + spaced })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.diffRefs)).toEqual(['café.ts:1', 'my file.ts:7', 'tab\there.ts:1'])
+    expect(sorted(pack.diffRefs)).toEqual(['café.ts:-1', 'café.ts:1', 'my file.ts:-7', 'my file.ts:7', 'tab\there.ts:1'].sort())
   })
 
   test('code files come first, largest change first, ties by path; docs files after', async () => {
@@ -206,8 +220,8 @@ describe('buildContextPack: surrounding code', () => {
       blobs: { 'src/a.ts': fileOf(after) },
     })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.diffRefs)).toEqual(refs('src/a.ts', 45, 55).sort())
-    expect(sorted(pack.codeRefs)).toEqual(refs('src/a.ts', 15, 85).sort())
+    expect(sorted(pack.diffRefs)).toEqual([...refs('src/a.ts', 45, 55), 'src/a.ts:-50'].sort())
+    expect(sorted(pack.codeRefs)).toEqual([...refs('src/a.ts', 15, 85), 'src/a.ts:-50'].sort())
     const around = section(pack, 'Surrounding code at this commit')
     expect(around).toContain('=== src/a.ts\n   15 | line 15\n')
     expect(around).toContain('   44 | line 44\n      …\n   56 | line 56\n')
@@ -223,7 +237,7 @@ describe('buildContextPack: surrounding code', () => {
       blobs: { 'src/a.ts': fileOf(lines) },
     })
     const { pack } = await build(repo, made)
-    expect(sorted(pack.codeRefs)).toEqual(refs('src/a.ts', 1, 71).sort())
+    expect(sorted(pack.codeRefs)).toEqual([...refs('src/a.ts', 1, 71), 'src/a.ts:-3', 'src/a.ts:-41'].sort())
   })
 
   test('only the 5 most-changed code files get surrounding code; deleted and missing blobs are skipped', async () => {
@@ -653,8 +667,9 @@ describe('isSecretLine: mid-line assignments (4c)', () => {
 })
 
 describe('buildContextPack: secret lines', () => {
-  const pad5 = (n: number) => String(n).padStart(5)
-  const marked = (n: number, kind: '+' | '-' | ' ') => `${kind === '-' ? ' '.repeat(5) : pad5(n)} ${kind} ${REDACTED}`
+  const pad5 = (n: number | string) => String(n).padStart(5)
+  // a removed line shows its number before the commit, with a minus
+  const marked = (n: number, kind: '+' | '-' | ' ') => `${kind === '-' ? pad5(`-${n}`) : pad5(n)} ${kind} ${REDACTED}`
 
   test('a key inside an ordinary file: the line is replaced whole, keeps its number, and is not citable', async () => {
     const lines = ['export const maps = {', `  apiKey: '${S.google}',`, '  zoom: 3,', '}']
@@ -686,9 +701,9 @@ describe('buildContextPack: secret lines', () => {
       patch: modified('src/a.ts', hunk(1, 1, [` const stripe = '${S.stripe}'`, `-API_TOKEN=${S.token}`, '+const token = readSecret()'])),
     })
     const { pack } = await build(repo, made)
-    expect(section(pack, 'Diff')).toContain(`${marked(1, ' ')}\n${marked(0, '-')}\n    2 + const token = readSecret()`)
+    expect(section(pack, 'Diff')).toContain(`${marked(1, ' ')}\n${marked(2, '-')}\n    2 + const token = readSecret()`)
     expect(pack.text).not.toContain('_live_')
-    expect(sorted(pack.diffRefs)).toEqual(['src/a.ts:2'])
+    expect(sorted(pack.diffRefs)).toEqual(['src/a.ts:2']) // the redacted removed line is not citable as src/a.ts:-2
     expect(pack.omitted).toContain('src/a.ts: 2 lines redacted (possible secret)')
   })
 
@@ -718,7 +733,7 @@ describe('buildContextPack: secret lines', () => {
     const { pack } = await build(repo, made)
     expect(pack.text).not.toContain(BODY[1]!)
     expect(pack.text).not.toContain(BODY[2]!)
-    expect(sorted(pack.diffRefs)).toEqual(['src/keys.ts:13', 'src/keys.ts:14'])
+    expect(sorted(pack.diffRefs)).toEqual(['src/keys.ts:-14', 'src/keys.ts:13', 'src/keys.ts:14'].sort())
     expect(pack.omitted).toContain('src/keys.ts: 3 lines redacted (possible secret)')
   })
 
@@ -748,8 +763,8 @@ describe('buildContextPack: secret lines', () => {
     expect(around).toContain(`    9 | ${REDACTED}\n   10 | \`\n`)
     expect(pack.text).not.toContain(BODY[0]!)
     expect(pack.text).not.toContain('correct-horse')
-    expect(sorted(pack.diffRefs)).toEqual(['src/server.ts:20'])
-    const expected = refs('src/server.ts', 1, 41).filter(ref => !/:(6|7|8|9|21)$/.test(ref))
+    expect(sorted(pack.diffRefs)).toEqual(['src/server.ts:-20', 'src/server.ts:20'].sort())
+    const expected = [...refs('src/server.ts', 1, 41).filter(ref => !/:(6|7|8|9|21)$/.test(ref)), 'src/server.ts:-20']
     expect(sorted(pack.codeRefs)).toEqual(expected.sort())
     expect(pack.omitted).toContain('src/server.ts: 5 lines redacted (possible secret)')
   })
@@ -773,7 +788,7 @@ describe('buildContextPack: secret lines', () => {
     const { pack } = await build(repo, made)
     expect(section(pack, 'Diff')).toContain(`@@ -1,1 +1,1 @@ ${REDACTED}\n`)
     expect(pack.text).not.toContain('AIza')
-    expect(sorted(pack.diffRefs)).toEqual(['src/a.ts:1'])
+    expect(sorted(pack.diffRefs)).toEqual(['src/a.ts:-1', 'src/a.ts:1'].sort())
     expect(pack.omitted).toContain('src/a.ts: 1 line redacted (possible secret)')
   })
 

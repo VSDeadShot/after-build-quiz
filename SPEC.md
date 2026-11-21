@@ -68,7 +68,10 @@ Claude Code update.
    each part has a size cap and says what it left out. Secret files (`.env*`, `*.pem`, `*.key`, by name,
    under their old or new path) never enter it: their diff and contents are listed as omitted. Lines that
    look like secrets (listed patterns) are replaced with a marker and can't be cited. Each
-   question carries private key points and must cite a `path:line` that is a line of the diff.
+   question carries private key points and must cite a line of the diff: `path:N` for an added or
+   unchanged line, by its number after the commit; `path:-N` for a removed line, every line of a deleted
+   file included, by its number before the commit. A renamed file's removed lines are cited under its
+   new path with their number before the commit.
    Ungrounded output is regenerated once; a second ungrounded output expires the commit (reason
    `ungrounded`), which `/quiz stats` counts. An API error or timeout is not a refusal: the commit stays
    pending.

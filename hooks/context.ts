@@ -340,16 +340,17 @@ const label = (file: FileDiff) => {
   return `${file.status}, ${counts}`
 }
 
-const renderLine = (file: FileDiff, line: Line, isRedacted: boolean) => {
+// A removed line (every line of a deleted file included) shows its number before the commit as -N.
+const renderLine = (line: Line, isRedacted: boolean) => {
   const text = isRedacted ? REDACTED : cut(line.text, LIMITS.line)
-  if (line.kind === '-') return `${file.status === 'deleted' ? pad(line.oldLine) : ' '.repeat(5)} - ${text}`
+  if (line.kind === '-') return `${pad(-line.oldLine)} - ${text}`
   return `${pad(line.newLine)} ${line.kind} ${text}`
 }
 
-const lineRef = (file: FileDiff, line: Line): string | undefined => {
-  if (line.kind !== '-') return `${file.path}:${line.newLine}`
-  return file.status === 'deleted' ? `${file.path}:${line.oldLine}` : undefined
-}
+// `path:N` by the number after the commit; a removed line `path:-N` by its number before it, under the
+// path its file is listed by (a rename's new path; a deleted file's own).
+const lineRef = (file: FileDiff, line: Line): string =>
+  line.kind === '-' ? `${file.path}:-${line.oldLine}` : `${file.path}:${line.newLine}`
 
 type Shown = { file: FileDiff; hunks: Hunk[] }
 
@@ -378,14 +379,13 @@ const renderDiff = (files: FileDiff[], refs: Set<string>, omitted: string[], red
     for (const hunk of file.hunks) {
       const header = renderHeader(hunk.header)
       const mask = secretMask(hunk.lines.map(line => line.text))
-      const block = [header.text, ...hunk.lines.map((line, i) => renderLine(file, line, mask[i]!))].join('\n')
+      const block = [header.text, ...hunk.lines.map((line, i) => renderLine(line, mask[i]!))].join('\n')
       if (left === 0 && used + block.length + 1 <= LIMITS.diff) {
         out.push(block)
         used += block.length + 1
         kept.push(hunk)
         hunk.lines.forEach((line, i) => {
-          const ref = mask[i] ? undefined : lineRef(file, line)
-          if (ref !== undefined) refs.add(ref)
+          if (!mask[i]) refs.add(lineRef(file, line))
         })
         note(redactions, file.path, mask.filter(Boolean).length + (header.isRedacted ? 1 : 0))
       } else {
@@ -556,8 +556,10 @@ export const buildContextPack = async (
       `# Commit ${sha.slice(0, 7)} in ${entry.repoName}`,
       `## Commit message\n${messageText || '(empty)'}`,
       `## Recent commits (newest first)\n${subjects.length === 0 ? '(none)' : subjects.map(s => `- ${s}`).join('\n')}`,
-      '## Diff\nLine numbers are the file\'s lines after this commit; a deleted file\'s are from before it. ' +
-        `"+" added, "-" removed.\n\n${renderedDiff.text || '(no text changes)'}`,
+      '## Diff\nLine numbers are the file\'s lines after this commit, cited as path:N. A removed line (every line ' +
+        'of a deleted file included) shows its number before this commit as -N, cited as path:-N under the path ' +
+        'its === line names. "+" added, "-" removed.' +
+        `\n\n${renderedDiff.text || '(no text changes)'}`,
       `## Surrounding code at this commit\n${around || '(none)'}`,
       `## Repo docs at this commit\n${docs.length === 0 ? '(none)' : docs.join('\n\n')}`,
       `## Omitted\n${omitted.length === 0 ? '(none)' : omitted.map(line => `- ${line}`).join('\n')}`,
