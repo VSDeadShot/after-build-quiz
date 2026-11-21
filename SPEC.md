@@ -60,21 +60,36 @@ Claude Code update.
    - WHY — a decision visible in the diff, interview-style
    - CONCEPT — the CS fundamental behind the change, grounded in this code
    - EXPLAIN IT BACK — what the commit does and why it matters, as told to an interviewer
-   Every question, WHY and EXPLAIN included, carries a concept tag from a fixed vocabulary.
+   Every question, WHY and EXPLAIN included, carries a concept tag from a fixed vocabulary:
+   `error-handling`, `exception-safety`, `resource-management`, `concurrency`, `race-conditions`,
+   `async-event-loop`, `state-immutability`, `data-structures`, `algorithmic-complexity`, `caching`,
+   `io-buffering`, `networking-http`, `input-validation`, `authn-authz`, `transactions-persistence`,
+   `schema-migrations`, `api-design`, `type-systems`, `testing-strategy`, `modularity-coupling`,
+   `configuration`, `performance`, `memory-management`, `build-tooling`, `observability`,
+   `idempotency-retries`. WHY and EXPLAIN may use `other:<kebab-case-slug>` (slug up to 40 characters)
+   when no tag fits; CONCEPT must use a listed tag.
    Generated once per quiz (kept in `active.json`) by an isolated, tool-less model call from a context pack
    read from the commit object, never the work tree: the commit message (subject and body, ~2k characters),
-   the diff with new-side line numbers, ±30 lines of surrounding code at that commit (the 5 most-changed
-   files), the 10 previous commit subjects, and the repo's SPEC.md / AGENTS.md / README.md at that commit;
-   each part has a size cap and says what it left out. Secret files (`.env*`, `*.pem`, `*.key`, by name,
-   under their old or new path) never enter it: their diff and contents are listed as omitted. Lines that
+   the diff with line numbers (after the commit; a removed line's from before it), ±30 lines of
+   surrounding code at that commit (the 5 most-changed files), the 10 previous commit subjects, and the
+   repo's SPEC.md / AGENTS.md / README.md at that commit; each part has a size cap and says what it left
+   out. Secret files (`.env*`, `*.pem`, `*.key`, by name, under their old or new path) never enter it:
+   their diff and contents are listed as omitted. Lines that
    look like secrets (listed patterns) are replaced with a marker and can't be cited. Each
    question carries private key points and must cite a line of the diff: `path:N` for an added or
    unchanged line, by its number after the commit; `path:-N` for a removed line, every line of a deleted
    file included, by its number before the commit. A renamed file's removed lines are cited under its
    new path with their number before the commit.
-   Ungrounded output is regenerated once; a second ungrounded output expires the commit (reason
-   `ungrounded`), which `/quiz stats` counts. An API error or timeout is not a refusal: the commit stays
-   pending.
+   The pack is sent as delimited data; nothing inside it is followed as an instruction. The reply is
+   checked in code: one JSON object holding exactly one question of each type (re-sorted into WHY,
+   CONCEPT, EXPLAIN order if needed), each with a valid tag, a question of 1–600 characters, 2–4 key
+   points of 1–300 characters, 1–4 distinct citable lines, no control characters other than newline
+   and tab, and no key point (12 characters or more) quoted in its own question. A reply that fails
+   is regenerated once, told what failed. Only well-formed JSON that fails a check is ungrounded:
+   two ungrounded replies expire the commit (reason `ungrounded`), which `/quiz stats` counts. A
+   reply that is not one JSON object (a refusal, a reply cut short at the token cap, garbage), on
+   either try, and no reply at all (an API error, an empty reply, a timeout) are not ungrounded: the
+   commit stays pending.
 6. **Grading.** An isolated, tool-less model call (`model`, default claude-opus-5-5) receives the context
    pack, the question, its key points, and the answer as delimited data — instructions inside an answer are
    never followed. Output: 0 wrong / 1 partial / 2 solid, plus the specific gap; a score below 2 cites at
@@ -216,6 +231,8 @@ unquoted value with no digit after a lower-case or camelCase secret name, or aft
 name.
 Commit subjects in `queue.json` and `active.json`, and a held answer in `active.json`, are stored as
 written, not redacted: they stay in the private data folder by design.
+Any installed plugin that hooks `model.complete` can read the context pack and the generated questions
+and key points; the main model never does.
 `!` shell commands start a model turn without a prompt event, so they do not pause an active quiz (the
 status line keeps showing the pending count). Whether user-invoked skills raise a prompt event is unverified
 on Claude Code 2.1.325; if they do not, they do not pause either. A session that dies without its session
