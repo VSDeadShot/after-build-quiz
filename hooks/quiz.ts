@@ -67,6 +67,17 @@ const task = (rejected: readonly string[]) => {
       'as path:N for an added or unchanged line (its number after the commit) or path:-N for a removed line (its ' +
       'number before the commit, shown as -N), under the path on the file\'s === line.',
     '',
+    'Rules for the three questions:',
+    '- Tags: an accurate listed tag beats other:, even if it is not the closest fit or another question already uses it. ' +
+      'Among accurate listed tags, prefer a different concept tag for each question. ' +
+      'Use other: only when no listed tag is accurate, and never pick an inaccurate tag.',
+    '- Questions: a question may name the code and the behaviour it asks about, but it must not state the mechanism or ' +
+      'reason its key points ask for. It must stay specific enough to be answerable from the code it cites.',
+    '- Key points: each is one checkable fact, in 120 characters or fewer where possible. Normally use 2 or 3 key points; ' +
+      'use 4 only when the answer cannot be complete without a fourth.',
+    '- The author sees the WHY key points before answering CONCEPT, so CONCEPT key points must not repeat WHY key points: ' +
+      'test a different fact. EXPLAIN is a recap and may overlap.',
+    '',
     'Reply with JSON only, no other text:',
     '{"questions":[{"qtype":"why","concept":"...","question":"...","keyPoints":["...","..."],"codeRefs":["path:N"]},' +
       '{"qtype":"concept",...},{"qtype":"explain",...}]}',
